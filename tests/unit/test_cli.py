@@ -274,3 +274,16 @@ def test_rank0_gets_the_resolved_settings_not_the_callers(monkeypatch):
     tp.Pair("peer-host", {"HIBANA_SPEC": "4", "HIBANA_TARGET": "qwen38"}, "hibana", ["engine"]).start()
     (_, rank1_env), (_, rank0_env) = started
     assert "HIBANA_TRACES" not in rank0_env and rank0_env["HIBANA_SPEC"] == "4" and rank0_env["HOME_MARKER"] == "kept"
+
+
+def test_the_peer_copy_resolves_links_out_of_each_directory(monkeypatch):
+    """A cache whose blobs link outside the model's directory reaches the peer as files: rsync copies links that leave
+    the transfer root, which the trailing slash makes the directory itself."""
+    from pathlib import Path
+    from hibana.launch import tp
+    calls = []
+    monkeypatch.setattr(tp, "ssh", lambda host, cmd, **kw: calls.append(("ssh", host, cmd)))
+    monkeypatch.setattr(tp, "run", lambda cmd, **kw: calls.append(("run", *cmd)))
+    tp.copy("peer", [Path("/cache/hub/models--org--m")], log=lambda *_: None)
+    assert calls == [("ssh", "peer", "mkdir -p /cache/hub/models--org--m"),
+                     ("run", "rsync", "-a", "--copy-unsafe-links", "/cache/hub/models--org--m/", "peer:/cache/hub/models--org--m/")]
