@@ -25,7 +25,7 @@ from hibana.cache.ledger import Ledger, after_plan_bytes
 from hibana.cache.radix import RadixCache
 from hibana.cache.snapshot import GRID
 from hibana.cache.request_state import StateManager
-from hibana.engine.contracts import ProposerContext, Proposer
+from hibana.engine.contracts import Proposer, ProposerContext, VerifiedFeatures
 from hibana.engine.profile import ServingProfile
 from hibana.engine.upload import upload
 from hibana.cache.state_pool import StatePool
@@ -845,6 +845,16 @@ class Executor:
             logits = self.model.logits(out["norm"])
         next_tokens = self.sampler.sample(logits, [r.params for r in reqs], [r.generator for r in reqs],
                                           sample_masks(reqs, logits.shape[-1])).tolist()
+        if self.spec is not None and self.spec.proposer.requirements.capabilities.batched_commit:
+            pending = [[r.output_ids[-1]] for r in reqs]
+            for r in reqs:
+                self.state.commit(r, 1)
+            layers = {lid: value.unsqueeze(1) for lid, value in out.get("features", {}).items()}
+            self.spec.proposer.accepted_batch(reqs, pending, VerifiedFeatures(norm=out["norm"].unsqueeze(1), layers=layers or None))
+            for r, tok in zip(reqs, next_tokens):
+                self.spec.start(r, int(tok))
+                r.push(int(tok))
+            return next_tokens
         for i, (r, tok) in enumerate(zip(reqs, next_tokens)):
             pending = r.output_ids[-1]
             self.state.commit(r, 1)

@@ -28,7 +28,7 @@ class DSparkProposer:
         self.pool = torch.cuda.graph_pool_handle() if context.device.type == "cuda" else None
         self.requirements = ProposerRequirements(
             "dspark", FeatureRequest(final_norm=True, layers=draft.features), persistent_bytes=draft.bytes + self.head_context.numel() * 2,
-            greedy_only=False, max_depth=k, capabilities=Capabilities(short_drafts=True))
+            greedy_only=False, max_depth=k, capabilities=Capabilities(short_drafts=True, batched_commit=True))
 
     def _taps(self, layers: dict, norm: torch.Tensor) -> list[torch.Tensor]:
         """The target's features at the draft's visits, then its final norm, as BF16 [N, H] rows."""

@@ -125,7 +125,8 @@ request that resumes from a cached prefix finds its draft context in the pages i
 
 A round drafts the block and verifies the first 3 drafts (`HIBANA_SPEC_DEPTHS`): each verified row reads its own
 experts, and the drafts past the third are rarely reached. Past four requests the rows stop sharing a round's
-fixed cost and the profiles decode plainly. Drafts are the draft's argmax; a sampled request verifies them by
+fixed cost and the profiles decode plainly; the drafter's context for each step's rows is then one batched commit
+(16 requests: 79.7 ms a step, against 83.4 a request at a time and 79.6 without the drafter). Drafts are the draft's argmax; a sampled request verifies them by
 rejection sampling. The draft runs in a CUDA graph per batch bucket and verify depth, about 7.6 ms a round with the
 BF16 head, nearly half of it the vocabulary head, which a round reads twice: once for the draft's logits, once for
 the verification's.
