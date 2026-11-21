@@ -1,6 +1,7 @@
 """Inkling's decode and prefill kernels against the layer in PyTorch operators, on random weights under the
 checkpoint's names, and the engine's decode against a prefill of the same tokens on the pinned checkpoint."""
-import os
+
+import gc
 
 import pytest
 import torch
@@ -65,6 +66,24 @@ def layer_weights(index: int, fp4: bool = True) -> Weights:
     for name, (rows, columns) in (("w13", (2 * c.MOE_INTERMEDIATE_SIZE, H)), ("w2", (H, c.MOE_INTERMEDIATE_SIZE))):
         w.update({f"{p}.mlp.experts.{name}_weight{suffix}": t for suffix, t in experts(gen, rows, columns, fp4).items()})
     return w
+
+
+def checkpoint():
+    """The pinned checkpoint's snapshot; the test skips without it, as the suite's other checkpoint modules do."""
+    try:
+        return INKLING.snapshot_dir()
+    except FileNotFoundError as exc:
+        pytest.skip(str(exc))
+
+
+def load():
+    """The pinned checkpoint's model, loaded once the memory an earlier module cached is free, as the suite's other
+    checkpoint modules load theirs."""
+    from hibana.target import load_model
+    snap = checkpoint()
+    gc.collect()
+    torch.cuda.empty_cache()
+    return load_model(INKLING, snap, log=None)
 
 
 def cosine(a, b) -> float:
@@ -173,7 +192,6 @@ def test_decode_and_prefill_experts_agree(fp4, rows):
     assert cosine(packed, dense) > 0.9999 and dense.float().abs().mean() > 0.01
 
 
-@pytest.mark.skipif(not os.environ.get("HIBANA_INKLING_TEST"), reason="set HIBANA_INKLING_TEST=1 to load the 18 GiB Inkling checkpoint")
 def test_decode_continues_what_prefill_computes():
     """On the pinned checkpoint: tokens decoded through the engine (chunked prefill, conv windows and K/V carried in
     the pools, decode graphs) against one stand-alone prefill of prompt plus output. The pool keeps BF16 K/V as the
@@ -185,11 +203,10 @@ def test_decode_continues_what_prefill_computes():
     from hibana.engine import config as engine_config
     from hibana.engine.executor import Executor
     from hibana.engine.sampler import SamplingParams
-    from hibana.target import load_model
     before = engine_config.current()
     engine_config.install(before.replace(kv_format="sim-bf16"))
     try:
-        model = load_model(INKLING, INKLING.snapshot_dir(), log=None)
+        model = load()
         ex = Executor(model, num_pages=8192, num_slots=8, max_batch=2, log=None)
         ex.capture_graphs(log=None)
         ids = chat_ids(f"Here is inference-engine source:\n{frozen_source()[:6000]}\n{CODE_QUESTION}")  # past the 1,024-key window
@@ -210,7 +227,6 @@ def test_decode_continues_what_prefill_computes():
         engine_config.install(before)
 
 
-@pytest.mark.skipif(not os.environ.get("HIBANA_INKLING_TEST"), reason="set HIBANA_INKLING_TEST=1 to load the 18 GiB Inkling checkpoint")
 def test_dspark_rounds_emit_what_a_prefill_predicts():
     """On the pinned checkpoint with its bundled drafter: every token a speculative round emits (accepted drafts and
     the correction) is the argmax of a stand-alone prefill at its position, up to the model's rounding sensitivity,
@@ -219,11 +235,10 @@ def test_dspark_rounds_emit_what_a_prefill_predicts():
     from hibana.engine import config as engine_config
     from hibana.engine.executor import Executor
     from hibana.engine.sampler import SamplingParams
-    from hibana.target import load_model
     before = engine_config.current()
     engine_config.install(before.replace(spec="7", spec_depths="1:3,2:3"))
     try:
-        model = load_model(INKLING, INKLING.snapshot_dir(), log=None)
+        model = load()
         ex = Executor(model, num_pages=8192, num_slots=8, max_batch=2, log=None)
         ex.enable_spec(7, proposer="dspark", state_strategy="snapshots")
         ex.capture_graphs(log=None)
@@ -249,5 +264,5 @@ def test_dspark_rounds_emit_what_a_prefill_predicts():
 
 def chat_ids(text: str) -> list[int]:
     from hibana.tokenizer import SnapshotTokenizer
-    tok = SnapshotTokenizer(INKLING.snapshot_dir())
+    tok = SnapshotTokenizer(checkpoint())
     return tok.encode("<|message_system|><|content_text|>Thinking effort level: 0<|end_message|><|message_user|><|content_text|>" + text + "<|end_message|>")

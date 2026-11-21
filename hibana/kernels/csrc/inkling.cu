@@ -1207,28 +1207,28 @@ torch::Tensor mix(torch::Tensor states, int64_t count, torch::Tensor partial, to
   auto* pp = gated ? reinterpret_cast<uint16_t*>(pair.data_ptr()) : nullptr;
   const float* wp = weight.data_ptr<float>();
   auto* op = reinterpret_cast<uint16_t*>(out.data_ptr());
-#define HIBANA_MIX(BF16, COUNT)                                                                                              \
+#define LAUNCH_MIX(BF16, COUNT)                                                                                              \
   mix_kernel<BF16, COUNT><<<grid, kMixThreads, 0, stream>>>(states.data_ptr<float>(), states.size(1), partial.data_ptr(),  \
                                                             queries.data_ptr<float>(), queries.size(0), sp, mp, g0, vp, gp, pp, wp, op)
-#define HIBANA_MIX_COUNT(COUNT)                                                                                              \
+#define LAUNCH_MIX_COUNT(COUNT)                                                                                              \
   case COUNT:                                                                                                                \
     if (bf16) {                                                                                                              \
-      HIBANA_MIX(true, COUNT);                                                                                               \
+      LAUNCH_MIX(true, COUNT);                                                                                               \
     } else {                                                                                                                 \
-      HIBANA_MIX(false, COUNT);                                                                                              \
+      LAUNCH_MIX(false, COUNT);                                                                                              \
     }                                                                                                                        \
     break
   switch (count) {  // an instance a count: the states stay in registers
-    HIBANA_MIX_COUNT(0);
-    HIBANA_MIX_COUNT(1);
-    HIBANA_MIX_COUNT(2);
-    HIBANA_MIX_COUNT(3);
-    HIBANA_MIX_COUNT(4);
+    LAUNCH_MIX_COUNT(0);
+    LAUNCH_MIX_COUNT(1);
+    LAUNCH_MIX_COUNT(2);
+    LAUNCH_MIX_COUNT(3);
+    LAUNCH_MIX_COUNT(4);
     default:
-      HIBANA_MIX_COUNT(5);
+      LAUNCH_MIX_COUNT(5);
   }
-#undef HIBANA_MIX_COUNT
-#undef HIBANA_MIX
+#undef LAUNCH_MIX_COUNT
+#undef LAUNCH_MIX
   if (gated) {
     const int pairs = rows * outputs;
     // low [rows, outputs, rank]: every gate's pair through its own down projection, in one launch for a few rows
@@ -1321,7 +1321,7 @@ std::vector<torch::Tensor> prep(torch::Tensor pq, torch::Tensor pk, torch::Tenso
   const int64_t width = state.size(3), visit_elems = state.size(1) * 3 * width;
   const size_t shared = (heads * kHeadDim + heads * d_rel + 2 * heads) * sizeof(float);
   const dim3 grid(rows, 3);
-#define HIBANA_PREP(FP8)                                                                                                     \
+#define LAUNCH_PREP(FP8)                                                                                                     \
   prep_kernel<FP8><<<grid, kPrepThreads, shared, stream>>>(                                                                  \
       reinterpret_cast<const uint16_t*>(pq.data_ptr()), pq.stride(0), reinterpret_cast<const uint16_t*>(pk.data_ptr()),      \
       reinterpret_cast<const uint16_t*>(pv.data_ptr()), pk.stride(0), q_scale.data_ptr<float>(), r_scale.data_ptr<float>(),  \
@@ -1333,11 +1333,11 @@ std::vector<torch::Tensor> prep(torch::Tensor pq, torch::Tensor pk, torch::Tenso
       pages.data_ptr<int32_t>(), reinterpret_cast<uint16_t*>(q.data_ptr()), rel.data_ptr<float>(),                           \
       sink.data_ptr<float>(), heads, kv_heads, d_rel, full, tau_floor, tau_alpha, qk_clip, rel_clip)
   if (fp8) {
-    HIBANA_PREP(true);
+    LAUNCH_PREP(true);
   } else {
-    HIBANA_PREP(false);
+    LAUNCH_PREP(false);
   }
-#undef HIBANA_PREP
+#undef LAUNCH_PREP
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {q, rel, sink};
 }
@@ -1403,16 +1403,16 @@ torch::Tensor gemv(torch::Tensor x, torch::Tensor w, int64_t first, int64_t seco
   cfg.numAttrs = 1;
   const int ni = n, ki = k, fi = first, si = second;
   const int64_t stride = sets > 1 ? static_cast<int64_t>(m) * k : 0;
-#define HIBANA_GEMV(M_)                                                                                         \
+#define LAUNCH_GEMV(M_)                                                                                         \
   C10_CUDA_CHECK(fp8 ? cudaLaunchKernelEx(&cfg, gemv_kernel<M_, true>, xp, wp, sp, op, ni, ki, fi, si, stride)  \
                      : cudaLaunchKernelEx(&cfg, gemv_kernel<M_, false>, xp, wp, sp, op, ni, ki, fi, si, stride))
   switch (m) {
-    case 1: HIBANA_GEMV(1); break;
-    case 2: HIBANA_GEMV(2); break;
-    case 3: HIBANA_GEMV(3); break;
-    default: HIBANA_GEMV(4); break;
+    case 1: LAUNCH_GEMV(1); break;
+    case 2: LAUNCH_GEMV(2); break;
+    case 3: LAUNCH_GEMV(3); break;
+    default: LAUNCH_GEMV(4); break;
   }
-#undef HIBANA_GEMV
+#undef LAUNCH_GEMV
   return out;
 }
 
