@@ -4,6 +4,8 @@
 Residual variance uses the FP32 sum; the numerator is reloaded from its BF16
 store. Keep the two loops and reduction layout: replacing the reload with an
 in-register cast or fusing FP8 quantization changes midpoint rounding.
+The variance sum's order is tl.sum's, which moved with Triton 3.8: a few
+outputs per million differ from 3.7's by one BF16 step.
 The compiled GDN kernel promotes epsilon and subsequent normalization math
 to FP64. Prefill keeps the native CUDA / FP32 implementations.
 """

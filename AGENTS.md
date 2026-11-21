@@ -39,6 +39,7 @@ HIBANA_RUN_GPU=1 uv run pytest tests/unit tests/gpu   # the GPU suite; check tha
 ```
 
 A version change touches both `constraints/` and `pyproject.toml`'s `constraint-dependencies`, then `uv lock`.
+Triton is also in `override-dependencies`, because torch pins another version of it.
 
 ## Rules
 
