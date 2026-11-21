@@ -1,6 +1,6 @@
-"""Inkling 2's kernels (`csrc/inkling.cu`), compiled on first use. For calls of a few rows (decode, verification):
-the relative-position attention over paged K/V, the BF16 projections and the steps between. `rms` and `combine`
-serve prefill too, whose other kernels (and every call's expert products) are `kernels/inkling_prefill.py`."""
+"""Inkling 2's CUDA kernels (`csrc/inkling.cu`), compiled on first use: decode and verification's attention, BF16 and
+FP8 projections and the steps between; `rms` and `combine` serve prefill too.
+"""
 
 from __future__ import annotations
 
@@ -13,10 +13,8 @@ import torch
 
 _SRC = Path(__file__).resolve().parent / "csrc" / "inkling.cu"
 MOE_ROWS = 64  # calls up to this many rows (decode, verification) multiply their (row, expert) pairs unsorted
-# Blocks a (row group, KV head) divides its keys among (K/V cold, attention and merge). A sliding layer's 1,024 keys
-# (1,027 for four verified rows) in 12 splits fill one 96-key chunk a block: 17.8 us for one row, 23.2 for four (16
-# splits: 18.3, 27.3). A full layer: 1,024 keys 18.9 us in 16 splits, 22.9 in 32; 32,000 keys 310 us either way, at
-# 216 GB/s; fewer splits leave the merge less to read.
+# Key splits a (row group, KV head): 12 fill one 96-key chunk a block on a sliding layer (four rows 23.2 against 27.3
+# us in 16); 16 on a full layer (1,024 keys 18.9 against 22.9 us in 32, equal at 32,000).
 LOCAL_SPLITS, GLOBAL_SPLITS = 12, 16
 GEMV_ROWS = 4  # rows `gemv` stages in a launch
 

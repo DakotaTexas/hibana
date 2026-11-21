@@ -6,12 +6,9 @@ a per-query sink logit, a sigmoid output gate and a short causal convolution on 
     logit[i, j] = q_i . k_j / sqrt(128) + (clip(scale * W_r x_q) [* tau] @ P)[i - j]   for 0 <= i - j < 1024
     out = W_o (sigmoid(W_g x_q) * softmax([logits, W_s x_q])[:-1] @ v)
 
-A sliding-window layer attends the last 1,024 keys and convolves with static taps; a full-attention layer attends
-everything, scales its queries and relative states by tau(position) and adds per-token, per-head taps projected from
-the key and value inputs. `Attention.forward` is the prefill path: the projections, then per sequence the K/V
-convolutions and `prefill.attention` over its pages (K and V in the pool's format); with `FUSED` off it is PyTorch
-operators throughout, the reference. `Attention.decode` runs decode and verification rows on the kernels of
-`kernels/inkling.py`; the tests hold all three to each other.
+Sliding-window layers attend the last 1,024 keys with static convolution taps; full-attention layers attend every key,
+scale by tau(position) and add per-token taps. `forward` is prefill (`FUSED` off: the PyTorch reference), `decode` is
+decode and verification.
 """
 
 from __future__ import annotations

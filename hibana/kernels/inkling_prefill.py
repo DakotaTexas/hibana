@@ -1,20 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Inkling 2's prefill kernels: the passes between and around prefill's tensor-core products, one launch each.
+"""Inkling 2's prefill kernels, and the experts' products for every call.
 
-`route` picks a wide call's experts and `place` sorts its (token, expert) pairs by expert, both on the GPU. The
-experts read their inputs quantized as the checkpoint requires (hf_quant_config.json): `quantize_nvfp4` and
-`quantize_mxfp8`, and `swiglu_quantize` for the activation between the two projections. `grouped_mm4` and
-`grouped_mm8` then multiply each expert's run of rows by that expert's matrix, both sides as packed (the
-checkpoint's tensors as stored), on the tensor cores' block-scaled product: one launch a projection over all experts,
-where a GEMM call per expert took 12 ms a layer visit, 5 of them the host's.
+Prefill: `route` and `place` pick and sort a call's (token, expert) pairs on the GPU; `quantize_nvfp4`,
+`quantize_mxfp8` and `swiglu_quantize` quantize the experts' inputs as hf_quant_config.json requires; `grouped_mm4`
+and `grouped_mm8` multiply every expert in one block-scaled tensor-core launch a projection (a GEMM an expert took
+12 ms a visit). `conv`, `mix`, `gate`, `queries` and `attention` are the steps between.
 
-`pair_mm` multiplies the few rows of a decode or verification call by their experts, unsorted (it runs in captured
-graphs), and past `GROUP_PAIRS` pairs grouped by expert on the GPU.
-
-`conv` is a stream's short convolution over a sequence's rows (static taps, or a full-attention layer's per-token
-taps), optionally with the residual it joins; `mix` is a sublayer's input from the block states; `gate` is the
-message gates with the RMS norm of the sublayer each feeds; `attention` is a sequence's relative-bias attention with
-the sink and the output gate. Decode and verification run their steps between the products on `kernels/inkling.py`.
+Decode and verification: `pair_mm` multiplies each (row, expert) pair where it is, inside CUDA graphs.
 """
 
 from __future__ import annotations
@@ -108,8 +100,6 @@ def quantize_nvfp4(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.T
     ("fouroversix_mae"; the rule and its arithmetic follow vLLM's `ops/nvfp4.py`, see THIRD_PARTY_NOTICES.md).
     -> (codes [M, K / 2] uint8, the even column in the low nibble; E4M3 block scales [M, K / 16]; unit FP32 [M])."""
     m, k = x.shape
-    if x.dtype != torch.bfloat16 or not x.is_contiguous() or k % 128:
-        raise ValueError("quantize_nvfp4 takes contiguous BF16 rows of a multiple of 128 values")
     codes = torch.empty((m, k // 2), dtype=torch.uint8, device=x.device)
     scales = torch.empty((m, k // 16), dtype=torch.float8_e4m3fn, device=x.device)
     unit = torch.empty(m, dtype=torch.float32, device=x.device)
@@ -121,10 +111,10 @@ def quantize_nvfp4(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.T
     return codes, scales, unit
 
 
-@triton.jit(do_not_specialize=['count'])
-def _quantize_mxfp8(X, Values, Scales, count, BLOCK: tl.constexpr):
-    at = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
-    x = tl.reshape(tl.load(X + at, at < count, other=0.0).to(tl.float32), (BLOCK // 32, 32))
+@triton.jit
+def _mxfp8_store(x, Values, Scales, at, count, BLOCK: tl.constexpr):
+    """x [BLOCK / 32, 32] FP32, the values at flat positions `at`, as MXFP8: per 32 the smallest power-of-two scale that
+    brings them within E4M3's 448, each value rounded to E4M3."""
     raw = tl.max(tl.abs(x), 1) * (1.0 / 448.0)
     exponent = ((raw.to(tl.int32, bitcast=True) + 0x007FFFFF) & 0x7F800000) >> 23
     exponent = tl.where(raw <= 2.0 ** -127, 0, tl.minimum(exponent, 254))
@@ -136,13 +126,18 @@ def _quantize_mxfp8(X, Values, Scales, count, BLOCK: tl.constexpr):
     tl.store(Scales + groups, exponent.to(tl.uint8), groups * 32 < count)
 
 
+@triton.jit(do_not_specialize=['count'])
+def _quantize_mxfp8(X, Values, Scales, count, BLOCK: tl.constexpr):
+    at = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+    x = tl.reshape(tl.load(X + at, at < count, other=0.0).to(tl.float32), (BLOCK // 32, 32))
+    _mxfp8_store(x, Values, Scales, at, count, BLOCK)
+
+
 def quantize_mxfp8(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """BF16 rows [M, K] as MXFP8, the way the checkpoint requires an MXFP8 expert's input: per 32 of a row the smallest
     power-of-two scale that brings them within E4M3's 448, each value rounded to E4M3.
     -> (E4M3 values [M, K], the scales' exponent bytes [M, K / 32])."""
     m, k = x.shape
-    if x.dtype != torch.bfloat16 or not x.is_contiguous() or k % 32:
-        raise ValueError("quantize_mxfp8 takes contiguous BF16 rows of a multiple of 32 values")
     values = torch.empty((m, k), dtype=torch.float8_e4m3fn, device=x.device)
     scales = torch.empty((m, k // 32), dtype=torch.uint8, device=x.device)
     if m:
@@ -400,31 +395,19 @@ def _swiglu_nvfp4(Hidden, Codes, Scales, Unit, I: tl.constexpr, MAIN: tl.constex
 def _swiglu_mxfp8(Hidden, Values, Scales, count, GATE_CAP: tl.constexpr, UP_CAP: tl.constexpr, BLOCK: tl.constexpr):
     at = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     x = tl.reshape(_swiglu(Hidden, tl.minimum(at, count - 1), GATE_CAP, UP_CAP), (BLOCK // 32, 32))
-    raw = tl.max(tl.abs(x), 1) * (1.0 / 448.0)
-    exponent = ((raw.to(tl.int32, bitcast=True) + 0x007FFFFF) & 0x7F800000) >> 23
-    exponent = tl.where(raw <= 2.0 ** -127, 0, tl.minimum(exponent, 254))
-    scale = (exponent << 23).to(tl.float32, bitcast=True)
-    inverse = tl.where(exponent == 0, 0.0, tl.div_rn(1.0, scale))
-    values = tl.minimum(tl.maximum(x * inverse[:, None], -448.0), 448.0).to(tl.float8e4nv)
-    tl.store(Values + at, tl.reshape(values, (BLOCK,)), at < count)
-    groups = tl.program_id(0).to(tl.int64) * (BLOCK // 32) + tl.arange(0, BLOCK // 32)
-    tl.store(Scales + groups, exponent.to(tl.uint8), groups * 32 < count)
+    _mxfp8_store(x, Values, Scales, at, count, BLOCK)
 
 
 def swiglu_quantize(hidden: torch.Tensor, nvfp4: bool, gate_cap: float, up_cap: float) -> tuple[torch.Tensor, ...]:
     """`quantize_nvfp4` (nvfp4) or `quantize_mxfp8` of the experts' activation (`_swiglu`) in one pass: hidden
     [P, 2 I] BF16, gate and up alternating."""
     p, i = hidden.shape[0], hidden.shape[1] // 2
-    if hidden.dtype != torch.bfloat16 or not hidden.is_contiguous() or i % 128:
-        raise ValueError("swiglu_quantize takes contiguous BF16 rows of 2 x a multiple of 128 values")
     if nvfp4:
         codes = torch.empty((p, i // 2), dtype=torch.uint8, device=hidden.device)
         scales = torch.empty((p, i // 16), dtype=torch.float8_e4m3fn, device=hidden.device)
         unit = torch.empty(p, dtype=torch.float32, device=hidden.device)
         if p:
             main = 1 << (i.bit_length() - 1)
-            if i - main not in (0, 128, 256, 512):
-                raise ValueError("swiglu_quantize takes rows of 2^n or 2^n + 128 x 2^m activations")
             _swiglu_nvfp4[(p,)](hidden, codes, scales, unit, I=i, MAIN=main, TAIL=i - main, GATE_CAP=gate_cap, UP_CAP=up_cap, num_warps=4,
                                 enable_fp_fusion=False)
         return codes, scales, unit
@@ -562,8 +545,6 @@ def pair_mm(rows: tuple, ids: torch.Tensor, share: int, weight: torch.Tensor, sc
     # whole weight rows a step: one row's eight NVFP4 up projections 111 -> 104 us cold (a pure read of their bytes
     # takes 102-104; steps of 512 values, 128 rows apart in memory, read at 214 GB/s), MXFP8 194 -> 186 us
     bn, steps = (32 if fp4 else 16), 4
-    if k == main or (k - main) & (k - main - 1) or n % (bn * steps):
-        raise ValueError(f"pair_mm takes K = two powers of two and N a multiple of {bn * steps}")
     out = torch.empty((ids.numel(), n // 2 if swiglu else n), dtype=torch.bfloat16, device=ids.device)
     codes, scales, unit = rows if fp4 else (*rows, factor)
     gate_cap, up_cap = swiglu or (0.0, 0.0)
@@ -571,8 +552,6 @@ def pair_mm(rows: tuple, ids: torch.Tensor, share: int, weight: torch.Tensor, sc
     if pairs > GROUP_PAIRS:
         # real routing, a visit's NVFP4 experts for 48 rows (a short prefill): 1,814 -> 1,578 us; 64 rows 2,285 ->
         # 1,698 (the sorted grouped path with its host sync: 1,548 and 1,677); even at 16-24 rows, ahead from 28-32
-        if ids.dim() != 2 or experts & (experts - 1) or n % 64:  # [T, k]: at most T pairs an expert
-            raise ValueError("grouped pair calls take ids [T, k], a power-of-two number of experts and N a multiple of 64")
         _expert_mm[(min(pairs, experts), n // 64)](codes, scales, unit, ids, weight, scale.view(torch.float8_e4m3fn) if fp4 else scale, factor, out,
                                                    P=pairs, PP=triton.next_power_of_2(pairs), E=experts, SHARE=share, FP4=fp4, N=n, K=k,
                                                    BM=max(16, triton.next_power_of_2(ids.shape[0])), BN=64,
@@ -731,8 +710,6 @@ def mix(states: torch.Tensor, count: int, queries: torch.Tensor, weight: torch.T
     if t:
         dummy = states
         main = 1 << (h.bit_length() - 1)
-        if (h - main) & (h - main - 1):
-            raise ValueError("mix takes rows of 2^n or 2^n + 2^m values")
         _mix[(t,)](dummy if full is None else full, dummy if taps is None else taps, (own if full is None else add) if (own is not None or add is not None) else dummy,
                    dummy if residual is None else residual, states, queries, queries if weight is None else weight, out, count, t,
                    H=h, SLOTS=slots, Q=q, S=triton.next_power_of_2(count + 1), QP=triton.next_power_of_2(q), CONV=full is not None,
@@ -811,8 +788,6 @@ def gate(x: torch.Tensor, message: torch.Tensor, down: torch.Tensor, forget: tor
     -> BF16 [G, T, H]: rms((1 - tanh(forget low)) x + tanh(gain low) message) * weight, low = BF16(down [rms(x), rms(message)])."""
     g, t, h = message.shape
     out = torch.empty((g, t, h), dtype=torch.bfloat16, device=x.device)
-    if h % 256:
-        raise ValueError("gate takes rows of a multiple of 256 values")
     if t:
         # blocks of 16 rows walked by two programs an SM: 1.18 ms for a sliding layer's three gates over 1,678 tokens,
         # 1.38 with a program a block, 2.24 as two batched products between a norm and a merge kernel
@@ -983,10 +958,8 @@ def attention(q: torch.Tensor, rel: torch.Tensor, pq: torch.Tensor, gate_at: int
     if tokens:
         rows = tokens * group
         block_m = 16 if rows <= 16 else 32 if rows <= 32 else 64 if rows <= 64 else 128
-        # Key blocks under full tiles, a chunk of 2,048 tokens: E4M3 blocks of 128 take 0.9 ms a sliding-window visit
-        # and 7.6 ms over 17,000 keys (blocks of 64: 1.7 and 9.7). BF16 blocks of 128 fit shared memory in one stage:
-        # 1.0 ms a sliding visit (blocks of 32 in two stages: 1.3, of 64: 1.7); past 16k keys, where the unbiased far
-        # blocks dominate, two stages of 64 win (32,000 keys: 14.7 ms against 17.6)
+        # 2,048-token chunk: E4M3 key blocks of 128 take 0.9 ms a sliding visit, 7.6 over 17,000 keys (64: 1.7, 9.7); BF16
+        # blocks of 128 in one stage 1.0 ms, but past 16k keys two stages of 64 win (32,000 keys: 14.7 against 17.6)
         fp8 = k.dtype == torch.float8_e4m3fn
         far = not window and q_start - k_start >= 16384
         block_n, stages = (128, 2) if fp8 else (64, 2) if far else (128, 1)

@@ -5,21 +5,11 @@
     weight = 8 * score / sum(the 8 scores)
     expert(x) = W_2 (softcap_4(g) * sigmoid(g) * softcap_25(u)),   [g; u] = W_13 x,   softcap_c(z) = c tanh(z / c)
 
-The checkpoint stores the experts quantized: NVFP4 (two E2M1 codes a byte, an E4M3 scale per 16 values and a factor
-amax / denominator per expert) in layers 0-19, MXFP8 (E4M3 values, a power-of-two scale per 32) in layers 20-23.
-Every call runs on the checkpoint's tensors, its inputs quantized as the checkpoint requires of them
-(hf_quant_config.json): an NVFP4 expert's input and activation as NVFP4 with a scale per token, an MXFP8 expert's as
-MXFP8. A projection is one tensor-core launch over every (row, expert) pair (`kernels/inkling_prefill.py`: both sides
-packed, on the block-scaled product): wide calls (prefill) sort the pairs by expert, so an expert's rows share its
-weights' tiles; calls of up to `kernels.MOE_ROWS` rows (decode, verification, in captured graphs) multiply each pair
-where it is, or past `prefill.GROUP_PAIRS` pairs find each expert's rows on the device, without the host's sync.
-
-Expert sharing (off by default) in decode and verification calls, as Nemotron's (`model/nemotron/moe.py`, whose
-route_budget ranks the same way: sigmoid + bias chooses, the plain sigmoid weighs): with HIBANA_MOE_KEEP=F every real
-row keeps its own top F experts, and its other top-8 experts ride along when they are in the call's set, which
-HIBANA_MOE_BUDGET=[P:]B grows past the floors' union by routing weight up to min(B, P x requests). A row's weights
-renormalize over its kept experts, times ROUTE_SCALE; its leftover slots name its top expert at weight 0, which the
-row reads anyway (a graph's padded rows: row 0's).
+The experts run on the checkpoint's packed tensors (NVFP4 in layers 0-19, MXFP8 in 20-23), their inputs quantized as
+hf_quant_config.json requires. Prefill sorts the (token, expert) pairs by expert; decode and verification multiply
+each pair where it is, inside CUDA graphs (`kernels/inkling_prefill.py`). HIBANA_MOE_KEEP / HIBANA_MOE_BUDGET (off
+by default) share experts across a decode or verification call through Nemotron's `route_budget`, which ranks the
+same way.
 """
 
 from __future__ import annotations
@@ -92,9 +82,7 @@ class Moe:
             down = prefill.pair_mm(quantize(act), ids, 1, *self.packed[3:])
             return kernels.combine(down, None, weights)
         ids, weights = self.route(x)
-        # The (token, expert) pairs sorted by expert, placed on the GPU (no host sync): each expert multiplies one
-        # contiguous run of rows, all of them in one launch a projection, its first reading each token's row where
-        # the pair needs it; the activation with its quantization and the tokens' weighted sums are a kernel each.
+        # pairs sorted by expert on the GPU (no host sync): each expert multiplies one run of rows, one launch a projection
         plan = prefill.place(ids, c.NUM_EXPERTS)
         if nvfp4:
             hidden = prefill.grouped_mm4(*prefill.quantize_nvfp4(x.contiguous()), plan, True, *self.packed[:3])

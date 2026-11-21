@@ -1,12 +1,7 @@
-"""Kernels of Inkling's DSpark drafter (`model/inkling/dspark.py`): its low-row projections, the recurrent head's
-gate and its vocabulary step.
-
-The drafter projects 8 rows a request (up to 32 in a round) through about 165 MB of BF16 weights a layer, then folds
-its recurrent head's latent over the 200k-row vocabulary three times a round. cuBLAS runs these on 16x16 cutlass tiles
-at 200-230 GB/s; one Triton program per 16 or 32 output columns that streams the weights in K order reaches 230-255
-GB/s on GB10 and, where cuBLAS keeps its 16-row tiles, gives the same bits (the same chain of k16 tensor-core
-products into one FP32 accumulator). Every elementwise step after a product keeps the PyTorch operators' BF16 round
-points, so the drafts stay the argmax of the same logits.
+"""Kernels of Inkling's DSpark drafter (`model/inkling/dspark.py`): low-row projections, the recurrent head's gate and
+its vocabulary step. Each streams its weights in K order (230-255 GB/s against cuBLAS's 200-230) and, where cuBLAS
+keeps its 16-row tiles, gives the same bits; every elementwise step keeps PyTorch's BF16 round points, so drafts stay
+the argmax of the same logits.
 """
 
 from __future__ import annotations
@@ -69,12 +64,8 @@ def linear(x: torch.Tensor, weight: torch.Tensor, *, residual: torch.Tensor | No
             gate, up = y.float().chunk(2, dim=-1)
             return (F.silu(gate) * up).to(x.dtype)
         return y if residual is None else residual.copy_(residual.to(x.dtype).float() + y.float())
-    if x.stride(1) != 1 or not weight.is_contiguous() or weight.shape[1] != k:
-        raise ValueError("draft linear: unit-stride rows and a contiguous weight")
     mode = 2 if swiglu else 1 if residual is not None else 0
     if mode == 1:
-        if residual.dtype != torch.float32 or residual.shape != (m, n) or residual.stride(1) != 1:
-            raise ValueError("draft linear: the residual must be FP32 [M, N]")
         y = r = residual
     else:
         y = torch.empty((m, n), dtype=torch.bfloat16, device=x.device)
@@ -110,8 +101,6 @@ def _gate(CTX, SC, MM, STATE, LATENT, RANK: tl.constexpr):
 def gate(context: torch.Tensor, mm: torch.Tensor, state: torch.Tensor, latent: torch.Tensor) -> None:
     """context [B, 3 r] FP32 (rows strided), mm [B, 3 r] FP32: state [B, r] BF16 advances in place, latent [B, r] BF16."""
     b, r = state.shape
-    if context.stride(1) != 1 or not mm.is_contiguous() or not state.is_contiguous() or not latent.is_contiguous():
-        raise ValueError("draft gate geometry")
     _gate[(b,)](context, context.stride(0), mm, state, latent, r, num_warps=2, enable_fp_fusion=False)
 
 
@@ -179,8 +168,6 @@ def vocab_step(latent: torch.Tensor, fold_weight: torch.Tensor, fold_bias: torch
         logits = base[:, :v] + torch.addmm(fold_bias, latent, fold_weight.T)
         out.copy_((torch.tanh(logits.float() / softcap) * softcap).to(latent.dtype).argmax(-1))
         return
-    if base.stride(1) != 1 or not latent.is_contiguous() or not fold_weight.is_contiguous():
-        raise ValueError("draft vocabulary step geometry")
     per = _STEP_BN * _STEP_GROUPS
     programs = triton.cdiv(v, per)
     mp = 16
@@ -195,9 +182,8 @@ def vocab_scratch(v: int, device) -> tuple[torch.Tensor, torch.Tensor]:
     return (torch.empty(programs * 16, dtype=torch.float32, device=device), torch.empty(programs * 16, dtype=torch.int32, device=device))
 
 
-# The drafter's norms run as `kernels.rms` does (inkling.cu, rms_kernel: 256 threads, thread t holding columns
-# t + 256 i, an FMA chain of squares, a butterfly within each warp, then the warps' sums in order), so fusing them
-# with what comes before and after keeps their bits.
+# The drafter's norms sum in `kernels.rms`'s order (per thread, then a warp butterfly, then the warps in order), so
+# fusing them keeps its bits.
 @triton.jit
 def _warp_sums(s, WARPS: tl.constexpr):
     """[WARPS * 32] thread values -> [WARPS]: each warp's xor-butterfly sum (lane 0's)."""
@@ -219,6 +205,15 @@ def _in_order(s, WARPS: tl.constexpr):
 
 
 @triton.jit
+def _mix_chunk(T0, T1, T2, T3, S0, S1, S2, S3, row, c, a0, a1, a2, a3):
+    """Columns `c` of row `row`'s mix of the four taps, FP32."""
+    x = tl.load(T0 + row * S0 + c).to(tl.float32) * a0
+    x = x + tl.load(T1 + row * S1 + c).to(tl.float32) * a1
+    x = x + tl.load(T2 + row * S2 + c).to(tl.float32) * a2
+    return x + tl.load(T3 + row * S3 + c).to(tl.float32) * a3
+
+
+@triton.jit
 def _mix_norm(T0, T1, T2, T3, S0, S1, S2, S3, ROWS, ALPHA, WEIGHT, OUT, T, EPS, HAS_ROWS: tl.constexpr, H: tl.constexpr):
     """out[m, t] = BF16(rms(sum_i alpha[m, i] f_i[row t]) * weight[m]) for the four taps; grid (T, mixes)."""
     t = tl.program_id(0)
@@ -232,20 +227,14 @@ def _mix_norm(T0, T1, T2, T3, S0, S1, S2, S3, ROWS, ALPHA, WEIGHT, OUT, T, EPS, 
     ss = tl.zeros((256,), tl.float32)
     for i in tl.static_range(9):
         c = lane + 256 * i
-        x = tl.load(T0 + row * S0 + c).to(tl.float32) * a0
-        x = x + tl.load(T1 + row * S1 + c).to(tl.float32) * a1
-        x = x + tl.load(T2 + row * S2 + c).to(tl.float32) * a2
-        x = x + tl.load(T3 + row * S3 + c).to(tl.float32) * a3
+        x = _mix_chunk(T0, T1, T2, T3, S0, S1, S2, S3, row, c, a0, a1, a2, a3)
         ss = tl.fma(x, x, ss)
     total = _in_order(_warp_sums(ss, 8), 8)
     scale = libdevice.rsqrt(tl.math.div_rn(total, 2304.0) + EPS)
     out = OUT + (m * T + t).to(tl.int64) * H
     for i in tl.static_range(9):
         c = lane + 256 * i
-        x = tl.load(T0 + row * S0 + c).to(tl.float32) * a0
-        x = x + tl.load(T1 + row * S1 + c).to(tl.float32) * a1
-        x = x + tl.load(T2 + row * S2 + c).to(tl.float32) * a2
-        x = x + tl.load(T3 + row * S3 + c).to(tl.float32) * a3
+        x = _mix_chunk(T0, T1, T2, T3, S0, S1, S2, S3, row, c, a0, a1, a2, a3)
         tl.store(out + c, (x * scale * tl.load(WEIGHT + m * H + c)).to(tl.bfloat16))
 
 
@@ -254,8 +243,6 @@ def mix_norm(taps, alpha: torch.Tensor, weight: torch.Tensor, eps: float, rows: 
     [mixes, T, 2304]: the RMS norm of each mix of the taps' rows (`rows`, int64 [T], or all N), as the drafter's
     `mix` (PyTorch's mul and sum over the taps, then `kernels.rms`) gives it."""
     n, h = taps[0].shape
-    if len(taps) != 4 or h != 2304 or any(t.shape[1] != h or t.stride(1) != 1 for t in taps):
-        raise ValueError("draft mix geometry")
     t = n if rows is None else rows.shape[0]
     mixes = alpha.shape[0]
     out = torch.empty((mixes, t, h), dtype=torch.bfloat16, device=taps[0].device)
@@ -306,15 +293,11 @@ def norm_rotate(x: torch.Tensor, col0: int, heads: int, weight: torch.Tensor, po
     `positions`: a new BF16 [T, heads, 128], or with `caches` (K, V pages [P, 1, heads, 128]) written to `pages` [T]
     with the V heads at columns values[1] of values[0]."""
     t = x.shape[0]
-    if x.stride(1) != 1 or cos.stride(1) != 1 or cos.stride(0) != sin.stride(0) or cos.shape[1] != 64:
-        raise ValueError("draft norm-rotate geometry")
     cache = caches is not None
     out = None
     if cache:
         v, vcol0 = values
         kc, vc = caches
-        if v.stride(1) != 1 or pages.shape != (t,) or any(c.shape[1:] != (1, heads, 128) or not c.is_contiguous() for c in caches):
-            raise ValueError("draft norm-rotate cache geometry")
     else:
         out = torch.empty((t, heads, 128), dtype=torch.bfloat16, device=x.device)
         v, vcol0, kc, vc, pages = x, 0, out, out, positions

@@ -1,16 +1,7 @@
-// Inkling 2 decode kernels: what a layer visit of a few rows (one a request, or a request's verified rows) runs
-// between its experts' products (`inkling_prefill.py`, on the tensor cores). Each serves a captured decode graph:
-// fixed grids, every size from its tensors. A visit is bound by memory traffic, not arithmetic, and one block draws
-// only about 5 GB/s of cold weights (one SM's share of the memory system), so whatever reads more than a few tens of
-// KB spreads over many blocks.
-//
-// Attention (`attention`): block (rows of a sequence, KV head, split) scores its share of the rows' keys for the
-//   head's three query heads in chunks with a running maximum (online softmax), then `merge` joins the splits with
-//   the sink logit and applies the output gate. A row is (sequence, visible keys): key j of a sequence is the token at position j, so
-//   the last visible key is the query's own and the bias index is their distance.
-//
-// The steps between (`mix` and the gate kernels, `rms`, `conv`, `prep`, `route`), the projection (`gemv`) and the
-// pass after the experts' products (`combine`) are described where they are defined.
+// Inkling 2 decode kernels: a layer visit's steps for a few rows (a request each, or a request's verified rows) around
+// its experts' products, inside captured graphs (fixed grids, sizes from the tensors). A visit is bound by memory
+// traffic, and one block draws only about 5 GB/s of cold weights, so whatever reads more than a few tens of KB spreads
+// over many blocks.
 
 #include <torch/extension.h>
 #include <c10/cuda/CUDAException.h>
@@ -51,19 +42,12 @@ constexpr int kRelMax = 16;     // the relative-position states' width
 constexpr int kSplitKeys = 32;  // fewest keys a split takes: a short row leaves its later blocks empty
 constexpr int kPartial = 2 + kHeadDim;  // a split's running maximum, weight sum and weighted values, per query head
 
-// grid (rows / group * kv_heads, splits): a block a share of the keys of `group` consecutive rows of one sequence
-// (decode: 1; verification: the pending token and its drafts) for the KV head's three query heads, in chunks of 96.
-// Rows of a sequence read the same pages, so the block loads and converts each key once for all its rows (R >= group,
-// rows past `group` idle) and masks a key a row does not see: four rows over 32k cold keys took 1,323 us as a block a
-// row (3.4x one row), 428 us so. Four threads a key each read a quarter of its K and V rows and of the rows' bias
-// rows in one run of loads, issued a chunk ahead (the loads of chunk c + 1 are in flight while chunk c is scored and
-// summed: one row over 100k keys 1,206 -> 1,070 us), score it against the staged queries and leave the V row in shared
-// memory by dimension; the block's maxima join the running ones (online softmax); then a thread a (head, dimension)
-// sums the weighted values of every row from shared memory, sixteen bytes a load. A block's time is its longest
-// thread's instructions, so both steps divide evenly among the threads (a thread a key scoring all 128 dimensions
-// held a short row to 4 us). A key at backward distance d < extent adds the bias BF16(rel . proj[d]) to its score
-// (rel [rows, heads, 16] FP32, proj [extent, 16] BF16 or null).
-// Two- and four-row blocks are held to two a multiprocessor (80 registers; four rows at 32k keys 909 -> 869 us).
+// grid (rows / group * kv_heads, splits): a block scores a share of the keys of `group` consecutive rows of one
+// sequence (the pending token and its drafts) for the KV head's three query heads, in chunks of 96 with a running
+// maximum. The rows share each key's load and mask the keys they do not see (four rows over 32k keys: 1,323 us as a
+// block a row, 428 shared). Four threads a key read its K, V and bias rows a chunk ahead; then a thread a (head,
+// dimension) sums the weighted values from shared memory. The bias of distance d < extent is BF16(rel . proj[d]).
+// Two- and four-row blocks are held to two a multiprocessor (four rows at 32k keys 909 -> 869 us).
 template <bool kFp8, int R>
 __global__ void __launch_bounds__(kAttnThreads, R == 2 || R == 4 ? 2 : 1) attention_kernel(
     const uint16_t* __restrict__ q, const float* __restrict__ rel, const uint16_t* __restrict__ proj, const uint8_t* __restrict__ k_pool,
@@ -414,20 +398,14 @@ __global__ void __launch_bounds__(kHeadDim) attention_merge_kernel(const float* 
 
 // ---------------------------------------------------------------------------------------------------- decode glue
 //
-// The small steps between a decode row's projections, one launch each instead of some two hundred PyTorch operators a
-// layer visit: `mix` (a sublayer input: the block attention residual, the message gate, the RMS norm), `conv` (a
-// hidden-stream convolution with its residual), `prep` (queries, relative states, keys and values from the three
-// projections, K/V written to their page) and `route` (the experts' router).
+// The steps between a decode row's projections, one launch each: `mix`, `conv`, `prep` and `route`.
 
 constexpr int kMixThreads = 256;
 constexpr int kMixPer = 9;  // values a thread holds: a row of 2,304 over the block
 constexpr float kEps = 1e-6f;
 
-// The glue kernels below run one block a row, and a block's time is its threads' chains of loads, not their
-// arithmetic: a load whose value the next instruction uses stalls its warp for the trip to the cache, so every
-// kernel reads what it needs in runs of independent loads into registers (loop bounds known at compile time) and
-// computes afterwards. Loading and accumulating value by value, the mix took 13 us an output and a short row's
-// attention 9; in runs, 2 to 3.
+// A glue kernel's time is its threads' chains of dependent loads, not its arithmetic, so each reads what it needs in
+// runs of independent loads into registers before computing (the mix: 13 us an output value by value, 2-3 in runs).
 
 // The sum of every thread's `v`, returned to all of them. scratch: one float a warp.
 __device__ __forceinline__ float block_sum(float v, float* scratch) {
@@ -638,9 +616,8 @@ __global__ void __launch_bounds__(kMixThreads) rms_kernel(const void* __restrict
   }
 }
 // The message gate, m <- (1 - tanh(forget low)) m + tanh(gain low) msg with low = down [rms(m); rms(msg)], then
-// rms(m) * weight. One block draws about 5 GB/s of cold weights (one SM's share of the memory system), and a gate
-// reads 1.8 MB of them: `low` is a projection of the pair (`gemv`, a segment a gate), and the two steps after it
-// spread over many blocks (in one block the gate took 300 us).
+// rms(m) * weight. A gate reads 1.8 MB of weights, so `low` runs on `gemv` and the steps after it spread over many
+// blocks (one block took 300 us).
 
 // grid (outputs * rows, H / 64): the gated values in place, and each block's sum of their squares.
 // low [rows, outputs, rank] BF16; forget, gain [G, H, rank] BF16; squares [outputs * rows, H / 64].
@@ -861,11 +838,9 @@ __global__ void __launch_bounds__(kPrepThreads) prep_kernel(
   }
 }
 // grid (ceil(rows / R), experts / 4), 128 threads: warp w scores expert 4 blockIdx.y + w on the block's R rows,
-// scores [rows, experts] = sigmoid(router x), each lane holding 16-byte runs of the router row, all loaded before the
-// products. The last block of a row group to finish (`done`, reset by it) picks each row's `topk` largest scores +
-// bias: ids int64 [rows, topk], weights = scale * score / their sum, FP32. router [E, H] BF16, H = 256 V. Cold router,
-// one row 8.9 -> 7.3 us, 4 rows 10.8 -> 8.3, 16 rows 20.5 -> 11.3 against a scoring kernel (a thread summing a run
-// of 36 values in one dependent chain) and a selection kernel.
+// sigmoid(router x). The last block of a row group to finish (`done`, which it resets) picks each row's `topk`
+// largest scores + bias: ids int64 [rows, topk], weights = scale * score / their sum. router [E, H] BF16, H = 256 V.
+// Cold, against a scoring and a selection kernel: one row 8.9 -> 7.3 us, 16 rows 20.5 -> 11.3.
 template <int V, int R>
 __global__ void __launch_bounds__(128) route_kernel(const uint16_t* __restrict__ x, const uint16_t* __restrict__ router,
                                                     const float* __restrict__ bias, float* __restrict__ scores, int* __restrict__ done,
@@ -967,22 +942,12 @@ constexpr int kGemvMaxSplit = 16;  // warps a row at most: a row of at most 16 x
 __device__ __forceinline__ void grid_wait() { asm volatile("griddepcontrol.wait;\n" ::: "memory"); }
 __device__ __forceinline__ void grid_launch() { asm volatile("griddepcontrol.launch_dependents;\n" ::: "memory"); }
 
-// y[m, n] = BF16(scale_s sum_k x[m, k] w[n, k]), accumulated in FP32, for a matrix [n, k] of BF16 or of E4M3 with
-// one FP32 scale s a stacked matrix (FP8: the activations stay BF16), and M rows: the attention projections,
-// vocabulary head and message gates' low projection in decode (cuBLAS's one-row BF16 GEMV streams them at 165 GB/s).
-// A row is split among S = ceil(row bytes / 1536) warps, each loading its 3 x 512 contiguous bytes (evict-first)
-// before anything else, then reading the activations through L1 (no staging, no barrier before the products); the
-// row's first warp adds the S partial sums in order. Against a warp a row looping over the whole row, BF16 at one row
-// (decode graph, spark4): a visit's projections 168 -> 162 us, `wo` 61 -> 59, the head 3.86 -> 3.70 ms, the 192-row
-// gate 9.9 -> 8.9, the 64-row gate 5.7 -> 3.9 (a plain streaming read of 40 MB: 165-168 us). E4M3 (spark5): a
-// visit's query, key and value 67 + 2 x 13 us in three launches of `TrunkLinear`'s GEMV -> 82 in one, `wo` 32 -> 31,
-// the head 1.87 -> 1.81 ms, and a sixteenth of the error (E4M3 activations: 2.6e-2 relative, BF16: 1.6e-3). The
-// loads go out before `grid_wait`: launched with programmatic dependent launch the weights stream while the kernel
-// before still runs.
-// Each output row's sums do not depend on M (a row decodes alone as it verifies). The matrix may be up to three
-// stacked ones (segments), each with its own M rows of x ([S, M, K]) or all reading the same ([M, K]): output rows
-// from `first` are the second segment, from `second` the third (a visit's query, key and value projections, or its
-// message gates, in one launch).
+// y[m, n] = BF16(s sum_k x[m, k] w[n, k]) in FP32 for a BF16 matrix, or an E4M3 one with an FP32 scale s (the
+// activations stay BF16): decode's attention projections, head and message gates' low projection. A row is split
+// among ceil(row bytes / 1536) warps, each loading its bytes before anything else; the row's first warp adds the
+// partial sums in order, so a row's result does not depend on M. Against a warp a row: a visit's projections
+// 168 -> 162 us, the head 3.86 -> 3.70 ms. Up to three stacked matrices (from rows `first` and `second`) each read
+// their own x ([S, M, K]) or all the same ([M, K]): a visit's query, key and value in one launch.
 template <int M, bool FP8>
 __global__ void __launch_bounds__(kGemvMaxSplit * kGemvPerBlock * 32) gemv_kernel(const uint16_t* __restrict__ x, const uint8_t* __restrict__ w,
                                                                                   const float* __restrict__ scales, uint16_t* __restrict__ out,
@@ -1063,8 +1028,8 @@ __global__ void __launch_bounds__(kGemvMaxSplit * kGemvPerBlock * 32) gemv_kerne
 
 // -------------------------------------------------------------------------------------------------- experts
 //
-// The experts' products and their activation run on the tensor cores (`kernels/inkling_prefill.py`); the tokens'
-// weighted sums after them are one pass over the (token, expert) pairs instead of PyTorch's dozen.
+// The experts' products run on the tensor cores (`kernels/inkling_prefill.py`); `combine` sums each token's weighted
+// expert outputs.
 
 // grid (tokens, ceil(H / 256)), a thread a channel: out[t] = BF16(sum_k weights[t, k] down[where[t, k]]), the token's
 // experts' outputs from their rows (where null: rows t topk .. t topk + topk - 1).

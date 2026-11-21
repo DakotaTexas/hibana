@@ -1,16 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Inkling 2 Mini's bundled DSpark drafter (`mtp.safetensors`): a three-layer block drafter and a recurrent head.
 
-A round drafts one block: the pending token (the anchor, embedded as the target embeds it) and seven mask rows at
-the positions after it. The block's rows attend each other in both directions and, behind them, the context: every
-committed position's K/V, which each draft layer projects from its own mix of the target's hidden states at four
-layer visits (`features`: the inputs of visits 5, 23 and 41 and the final norm). Layers 0 and 2 see the last 1,024
-context positions, layer 1 all of them. The mask rows' hidden states go through the target's vocabulary head, and
-the recurrent head (`draft`) corrects each position's logits from a small state, the previous token and the last
-committed position's features, so the block is drawn position by position.
-
-Context K/V are per-page rows of the target's KV pool (`register`), so a cached prefix brings its draft context
-with its pages. Model equations follow the Apache-2.0 vLLM implementation (see THIRD_PARTY_NOTICES.md).
+A round drafts one block: the pending token and seven mask rows, which attend each other and the context, every
+committed position's K/V projected from the target's features at visits 5, 23 and 41 and the final norm. Layers 0
+and 2 see the last 1,024 positions, layer 1 all of them. The recurrent head then corrects each position's logits
+from the previous token. Context K/V are per-page rows of the KV pool, so a cached prefix brings its draft context.
+The equations follow vLLM's implementation (Apache-2.0, see THIRD_PARTY_NOTICES.md).
 """
 
 from __future__ import annotations

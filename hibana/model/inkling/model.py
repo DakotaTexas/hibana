@@ -1,20 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Inkling-2-Mini's text model assembled for the engine: a looped decoder of 24 layers (48 visits a token), block
-attention residuals in place of a residual stream, the final norm and the softcapped BF16 head.
+"""Inkling-2-Mini's text model for the engine: a looped decoder of 24 layers (48 visits a token) with block attention
+residuals, the final norm and the softcapped head.
 
-There is no single residual stream. Layers come in blocks of six; a block's sum of attention and MLP outputs is its
-state, and every sublayer input is a softmax mix, by a learned query, over the RMS-normalized earlier block states
-(the embedding first) and the running block (`attn_res`). The core (layers 6-17, two blocks) runs three passes with
-the same weights: each pass restarts from the prelude's state, and from the second on every core sublayer input
-merges, through a rank-64 gate, a message mixed from the previous pass's two block states (`MessageGate`).
+Layers come in blocks of six; every sublayer input is a softmax mix, by a learned query, of the normalized earlier
+block states and the running block (`attn_res`). The core (layers 6-17) runs three passes, and from the second on
+each core sublayer input merges a message from the previous pass through a rank-64 gate (`MessageGate`).
 
-`forward()` follows the 27B's contract (`ForwardContext` prefill / decode; `norm` is the final norm the head reads).
-A visit is the target's layer: visit v keeps its K/V in the pool's layer v and its four convolution windows in the
-state pool's `inkling_conv` rows (`register_state`). Prefill runs `prefill_visit` on the page lists
-`forward_extras()` hands it (tensor-core products with the kernels of `kernels/inkling_prefill.py` between them);
-decode runs `decode_visit` on the kernels of `kernels/inkling.py` over the pages the engine planned, in a CUDA graph
-or not, and so does verification, with `ForwardContext.verify_steps` rows a request. `Layer.forward` states the same
-layer in PyTorch operators: the tests hold both to it. Image input is not implemented.
+A visit is the target's layer: it keeps its own K/V and its own convolution windows. Prefill runs `prefill_visit`,
+decode and verification `decode_visit`; `Layer.forward` is the same layer in PyTorch, the tests' reference.
 """
 
 from __future__ import annotations
