@@ -4,6 +4,7 @@
     hibana serve flashnext --detach  # Qwen3.8-Flash-Next on :30004 as a background service (hibana stop, hibana logs -f)
     hibana serve nemotron            # Nemotron-3.5-Super (120B-A12B, NVFP4) on :30005, one Spark
     hibana serve bolt                # Nemotron-3.5-Bolt (74B-A9B, packed) on :30006, one Spark
+    hibana serve inkling             # Inkling-2-Mini (26B-A3.4B, looped) on :30007, one Spark
     hibana serve 27b --tp 2          # tensor-parallel on two DGX Sparks
     hibana chat                      # chat with whichever target is serving
     hibana launch claude             # Claude Code (or opencode, aider) set up for the serving target
@@ -34,8 +35,8 @@ def add_engine_args(p: argparse.ArgumentParser) -> None:
     """`hibana engine`: the server itself, with every setting explicit (what `hibana serve` and the ranks run)."""
     p.add_argument("--target", default=None, help="pinned serving target (default: HIBANA_TARGET, else qwen38)")
     p.add_argument("--host", default=None, help="default: 127.0.0.1")
-    p.add_argument("--port", type=int, default=None, help="default: the target's, as `hibana serve` (27B 30001, Flash-Next 30004, Nemotron 30005, Bolt 30006)")
-    p.add_argument("--proposer", choices=("mtp", "dflash2"), default=None, help="default: the target's (27B and Bolt dflash2; Flash-Next and Super mtp)")
+    p.add_argument("--port", type=int, default=None, help="default: the target's, as `hibana serve` (27B 30001, Flash-Next 30004, Nemotron 30005, Bolt 30006, Inkling 30007)")
+    p.add_argument("--proposer", choices=("mtp", "dflash2", "dspark"), default=None, help="default: the target's (27B and Bolt dflash2; Flash-Next and Super mtp; Inkling dspark)")
     p.add_argument("--verify-state", choices=("snapshots", "reconstruct"), default=None, help="default: reconstruct")
     p.add_argument("--draft-precision", choices=("bf16", "fp8"), default=None, help="parallel draft matrix precision (default: the target's)")
     p.add_argument("--spec", type=int, default=None, help="draft tokens per round (0 = off; default: HIBANA_SPEC, else the proposer's validated depth)")
@@ -161,7 +162,7 @@ def engine_parser() -> argparse.ArgumentParser:
     return p
 
 
-def add_target(p: argparse.ArgumentParser, help: str = "27b, flashnext, nemotron (Super) or bolt (Nemotron Bolt)") -> None:
+def add_target(p: argparse.ArgumentParser, help: str = "27b, flashnext, nemotron (Super), bolt (Nemotron Bolt) or inkling (Inkling-2-Mini)") -> None:
     p.add_argument("target", nargs="?", choices=TARGET_CHOICES, metavar="TARGET", help=help)
 
 
@@ -170,19 +171,19 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
 
     p = sub.add_parser("serve", help="serve a model (in the foreground; --detach for a background service)")
-    add_target(p, "27b, flashnext, nemotron (Super) or bolt (Nemotron Bolt); default: HIBANA_TARGET")
+    add_target(p, "27b, flashnext, nemotron (Super), bolt (Nemotron Bolt) or inkling (Inkling-2-Mini); default: HIBANA_TARGET")
     g = p.add_mutually_exclusive_group()
     for name in PROFILE_NAMES:
         g.add_argument(f"--{name}", dest="profile", action="store_const", const=name, help=PROFILE_HELP[name])
     p.add_argument("-d", "--detach", action="store_true", help="run as a user systemd service (hibana stop | status | logs)")
     p.add_argument("--tp", type=int, choices=(1, 2), default=1, help="2: tensor-parallel on two DGX Sparks (docs/tensor-parallel.md)")
-    p.add_argument("--port", type=int, default=None, help="default: 30001 for the 27B, 30004 for Flash-Next, 30005 for Nemotron Super, 30006 for Bolt")
+    p.add_argument("--port", type=int, default=None, help="default: 30001 for the 27B, 30004 for Flash-Next, 30005 for Nemotron Super, 30006 for Bolt, 30007 for Inkling")
     p.add_argument("--host", default=None, help="default: 127.0.0.1")
     p.add_argument("--context-length", type=int, default=None, help="largest prompt plus output per request (default 262144)")
     p.add_argument("--max-batch", type=int, default=None, help="most requests decoded together, 1-128 (default: the profile's)")
     p.add_argument("--traces", action="store_true", help="record each request's token IDs and speculative rounds (HIBANA_TRACES, else $HIBANA_RESULTS/traces)")
     p.add_argument("--draft", default=None, help="serve this DFlash2/LiLiCorr checkpoint directory instead of the publisher's draft")
-    p.add_argument("--proposer", choices=("mtp", "dflash2"), default=None, help=argparse.SUPPRESS)
+    p.add_argument("--proposer", choices=("mtp", "dflash2", "dspark"), default=None, help=argparse.SUPPRESS)
     p.add_argument("--spec", type=int, default=None, help=argparse.SUPPRESS)
     p.add_argument("--draft-precision", choices=("bf16", "fp8"), default=None, help=argparse.SUPPRESS)
     p.add_argument("--spec-depths", default=None, help=argparse.SUPPRESS)

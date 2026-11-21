@@ -2,7 +2,7 @@
 import pytest
 
 from hibana import config
-from hibana.target import DEFAULT_TARGET, FLASHNEXT, NEMOTRON, NEMOTRON_BOLT, QWEN38, TARGETS, get
+from hibana.target import DEFAULT_TARGET, FLASHNEXT, INKLING, NEMOTRON, NEMOTRON_BOLT, QWEN38, TARGETS, get
 from hibana.cache import ledger, state_pool
 from hibana.cache.spec_budget import verify_bytes
 
@@ -10,7 +10,7 @@ from hibana.cache.spec_budget import verify_bytes
 def test_default_target_matches_the_pinned_constants():
     t = QWEN38
     assert get(None) is DEFAULT_TARGET is t and get("qwen38") is t and TARGETS == {
-        "qwen38": t, "flashnext": FLASHNEXT, "nemotron": NEMOTRON, "bolt": NEMOTRON_BOLT}
+        "qwen38": t, "flashnext": FLASHNEXT, "nemotron": NEMOTRON, "bolt": NEMOTRON_BOLT, "inkling": INKLING}
     assert (t.model_id, t.model_revision, t.model_cache_key, t.architecture) == (config.MODEL_ID, config.MODEL_REVISION, config.MODEL_CACHE_KEY, config.MODEL_ARCHITECTURE)
     assert (t.hidden_size, t.num_layers, t.vocab_size, t.context_length) == (config.HIDDEN_SIZE, config.NUM_LAYERS, config.VOCAB_SIZE, config.CONTEXT_LENGTH)
     assert (t.num_attention_heads, t.num_kv_heads, t.head_dim, t.rotary_dim) == (config.NUM_ATTENTION_HEADS, config.NUM_KV_HEADS, config.HEAD_DIM, int(config.HEAD_DIM * config.PARTIAL_ROTARY_FACTOR))
@@ -57,3 +57,16 @@ def test_nemotron_maps_mamba_onto_the_recurrent_pools():
     assert t.attention_layer_ids == [7, 16, 25, 36, 47, 58, 69, 78] and t.gdn_layer_ids[:4] == [0, 2, 4, 6]
     assert t.conv_dim == 8192 + 2 * 8 * 128 and t.state_bytes_per_layer == 10240 * 3 * 2 + 128 * 64 * 128 * 4
     assert t.rotary_dim == 0 and t.kv_bytes_per_token == 2 * 2 * 128 * 8 and t.stop_token_ids == (11, 2)
+
+
+def test_inkling_numbers_its_layer_visits():
+    """Inkling's layers are the 48 visits a token makes of 24 layers of weights (the core, layers 6-17, three times):
+    each visit keeps K/V and four convolution windows, the slot's whole state; no layer is recurrent."""
+    from hibana.model.inkling import config as c
+    t = INKLING
+    assert get("inkling") is t and (t.num_layers, len(t.attention_layer_ids), t.gdn_layer_ids) == (48, 48, [])
+    assert [c.VISITS[v] for v in (0, 5, 6, 17, 18, 29, 30, 41, 42, 47)] == [
+        (0, 0), (5, 0), (6, 0), (17, 0), (6, 1), (17, 1), (6, 2), (17, 2), (18, 0), (23, 0)]
+    assert t.kv_bytes_per_token == 2 * 8 * 128 * 48 and t.rotary_dim == 0
+    assert t.state_bytes_per_slot == 48 * 3 * (2 * 1024 + 2 * 2304) * 2 == ledger.Ledger(target=t).target.state_bytes_per_slot
+    assert (t.chat_format, t.stop_token_ids, t.kv_formats) == ("inkling", (200006,), ("fp8", "sim-bf16"))

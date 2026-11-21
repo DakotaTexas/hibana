@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from hibana.api.parsers.reasoning import ReasoningParser
@@ -68,3 +70,30 @@ def test_tool_call_drafted_in_closed_reasoning_stays_reasoning(size):
 def test_unclosed_reasoning_otherwise_stays_reasoning(tools, text):
     p = ReasoningParser(in_reasoning=True, tools=tools)
     assert feed_all(p, text, 2) == (text, "")
+
+
+INKLING_TURN = ('<|message_model|><|content_thinking|>Need the tool.<|end_message|><|message_model|><|content_text|>Let me check.<|end_message|>'
+                '<|message_model|>get_weather<|content_invoke_tool_json|>{"name":"get_weather","args":{"city":"Paris","days":3}}<|end_message|>')
+
+
+@pytest.mark.parametrize("step", [1, 5, 1000])
+def test_inkling_turn_splits_at_any_chunking(step):
+    """Inkling frames its turn with tokens: thinking is reasoning, text is content, a tool's name header is dropped
+    and its {"name", "args"} call becomes a block the tool parser reads, however the text arrives."""
+    from hibana.api.parsers.inkling import InklingParser
+    p = InklingParser()
+    deltas = [p.feed(INKLING_TURN[i:i + step]) for i in range(0, len(INKLING_TURN), step)] + [p.finish()]
+    assert "".join(r for r, _ in deltas) == p.reasoning == "Need the tool."
+    assert "".join(c for _, c in deltas) == p.content and p.content.startswith("Let me check.<tool_call>")
+    content, calls = parse_tool_calls(p.content, None)
+    assert content == "Let me check." and json.loads(calls[0]["function"]["arguments"]) == {"city": "Paris", "days": 3}
+    assert calls[0]["function"]["name"] == "get_weather"
+
+
+def test_inkling_text_keeps_what_is_not_a_token():
+    from hibana.api.parsers.inkling import InklingParser
+    p = InklingParser()
+    for piece in ("<|message_model|><|content_text|>a <", "| b <|x|> c<", "|end_message|>"):
+        p.feed(piece)
+    p.finish()
+    assert p.content == "a <| b <|x|> c" and p.reasoning == ""

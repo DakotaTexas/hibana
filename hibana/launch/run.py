@@ -54,7 +54,7 @@ def settings_for(args, **kw) -> Settings:
 def serve(args) -> int:
     if not args.target and not (os.environ.get("HIBANA_TARGET") or read_config_file(config_file()).get("HIBANA_TARGET")):
         # serving takes the GPU and may start a download of 26-135 GB: only on a model someone named
-        sys.exit("hibana serve: name a model: 27b, flashnext, nemotron or bolt (or set HIBANA_TARGET)")
+        sys.exit("hibana serve: name a model: 27b, flashnext, nemotron, bolt or inkling (or set HIBANA_TARGET)")
     try:
         s = settings_for(args, traces=args.traces, tp=args.tp)
     except ValueError as exc:

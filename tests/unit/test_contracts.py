@@ -175,7 +175,7 @@ def test_profile_limits_and_load_budget(monkeypatch):
     # context, batch and scheduling limits.
     from hibana.cache.spec_budget import SpecConfig
     assert SpecConfig('dflash2', 15).depth == 15
-    for name, depth in [('dflash2', 16), ('mtp', 9), ('dspark', 3), ('ngram', 3)]:  # past the depth, or not served
+    for name, depth in [('dflash2', 16), ('mtp', 9), ('dspark', 8), ('ngram', 3)]:  # past the depth, or not served
         with pytest.raises(ValueError, match='proposer/depth'):
             SpecConfig(name, depth)
     floor = ledger.host_floor_bytes()  # a load needs its peak above the host floor

@@ -102,6 +102,7 @@ class EngineConfig:
     ssm_compensators: int | None = None       # HIBANA_SSM_COMPENSATORS: FP16 rank-one outlier terms kept beside the quantized state (0-16; unset: 4, or 8 for int4)
     flashnext_trunk: str = "fp8"              # HIBANA_FLASHNEXT_TRUNK: bf16 | fp8
     trunk_keep_bf16: str | None = None        # HIBANA_TRUNK_KEEP_BF16: regex of Flash-Next projections kept BF16
+    inkling_trunk: str = "bf16"               # HIBANA_INKLING_TRUNK: bf16 (the checkpoint's) | fp8 (attention projections and head at load)
     flashnext_experts: str = "w3"             # HIBANA_FLASHNEXT_EXPERTS: w3 (the W3 checkpoint's 3-bit routed experts when it carries them) | nvfp4
     bolt_experts: str = "b12x"                # HIBANA_BOLT_EXPERTS: b12x fused MoE (BF16 activations) | fp8 grouped native IQ2 | bf16 Triton weight-only
     vision: bool = False                      # HIBANA_VISION: load the checkpoint's vision encoder for image input (Nemotron Super and Bolt; about 1.7 GiB)
@@ -186,6 +187,7 @@ class EngineConfig:
             ssm_compensators=_int(e, "HIBANA_SSM_COMPENSATORS", None),
             flashnext_trunk=_str(e, "HIBANA_FLASHNEXT_TRUNK", "fp8"),
             trunk_keep_bf16=_str(e, "HIBANA_TRUNK_KEEP_BF16"),
+            inkling_trunk=_str(e, "HIBANA_INKLING_TRUNK", "bf16"),
             flashnext_experts=_str(e, "HIBANA_FLASHNEXT_EXPERTS", "w3"),
             bolt_experts=_str(e, "HIBANA_BOLT_EXPERTS", "b12x"),
             vision=_flag(e, "HIBANA_VISION"),

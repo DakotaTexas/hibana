@@ -64,6 +64,11 @@ def create_app(engine: EngineLoop, tok: SnapshotTokenizer, tmpl: ChatTemplate, d
     input, else None."""
     MODEL_ID = describe.get("model_path", targets.DEFAULT_TARGET.model_id)  # the served checkpoint id, reported as the model name
     markers = media.Markers(tok, vision) if vision is not None else None
+    chat_format = getattr(tmpl, "chat_format", "qwen")  # how the target frames a turn (`Target.chat_format`)
+
+    def chat_detok(stop) -> Detokenizer:
+        """A chat reply's detokenizer: Inkling frames its turn with special tokens the parser reads as text."""
+        return Detokenizer(tok, stop, skip_special=chat_format != "inkling")
     @asynccontextmanager
     async def lifespan(app):
         yield
@@ -181,7 +186,7 @@ def create_app(engine: EngineLoop, tok: SnapshotTokenizer, tmpl: ChatTemplate, d
         Content is held back once a tool call starts; the final step carries
         the parsed calls, with reason "tool_calls" when there are any. Returns
         early when the client disconnects; raises EngineUnavailable on engine failure."""
-        rp = ReasoningParser(in_reasoning, tools=bool(tools))
+        rp = _chat_parser(chat_format, in_reasoning, tools)
         out: list[int] = []
         buffered_tool = ""
         while True:
@@ -444,7 +449,7 @@ def create_app(engine: EngineLoop, tok: SnapshotTokenizer, tmpl: ChatTemplate, d
                 sent_role = False
                 try:
                     async for r_delta, c_delta, calls, finished, reason, n_out in _chat_steps(
-                            ticket, Detokenizer(tok, stop), http, in_reasoning, tools):
+                            ticket, chat_detok(stop), http, in_reasoning, tools):
                         delta: dict[str, Any] = {}
                         if not sent_role:
                             delta["role"] = "assistant"
@@ -466,8 +471,8 @@ def create_app(engine: EngineLoop, tok: SnapshotTokenizer, tmpl: ChatTemplate, d
                 yield "data: [DONE]\n\n"
             return StreamingResponse(_stream(events(), ticket), media_type="text/event-stream")
 
-        out, text, reason = await _collect(ticket, Detokenizer(tok, stop), http)
-        reasoning, content, calls = _split_chat(text, in_reasoning, tools)
+        out, text, reason = await _collect(ticket, chat_detok(stop), http)
+        reasoning, content, calls = _split_chat(text, in_reasoning, tools, chat_format)
         message: dict[str, Any] = {"role": "assistant", "content": content if content or not calls else None}
         if reasoning:
             message["reasoning_content"] = reasoning
@@ -504,10 +509,10 @@ def create_app(engine: EngineLoop, tok: SnapshotTokenizer, tmpl: ChatTemplate, d
         base = params.seed
         tickets = [await _submit(ids, dataclasses.replace(params, seed=None if base is None else base + i), prompt_media)
                    for i in range(n)]
-        results = await asyncio.gather(*[_collect(t, Detokenizer(tok, stop), http) for t in tickets])
+        results = await asyncio.gather(*[_collect(t, chat_detok(stop), http) for t in tickets])
         choices, completion, reasoning_total = [], 0, 0
         for i, (out, text, reason) in enumerate(results):
-            reasoning, content, calls = _split_chat(text, in_reasoning, tools)
+            reasoning, content, calls = _split_chat(text, in_reasoning, tools, chat_format)
             message: dict[str, Any] = {"role": "assistant", "content": content if content or not calls else None}
             if reasoning:
                 message["reasoning_content"] = reasoning
@@ -602,7 +607,7 @@ def create_app(engine: EngineLoop, tok: SnapshotTokenizer, tmpl: ChatTemplate, d
             return {"input_tokens": len(ids) - cached, "output_tokens": n_out,
                     "cache_creation_input_tokens": 0, "cache_read_input_tokens": cached}
 
-        detok = Detokenizer(tok, stop)
+        detok = chat_detok(stop)
         if body.get("stream"):
             sse = messages_api.sse
 
@@ -632,7 +637,7 @@ def create_app(engine: EngineLoop, tok: SnapshotTokenizer, tmpl: ChatTemplate, d
             return StreamingResponse(_stream(events(), ticket), media_type="text/event-stream")
 
         out, text, reason = await _collect(ticket, detok, http)
-        reasoning, content, calls = _split_chat(text, in_reasoning, tools)
+        reasoning, content, calls = _split_chat(text, in_reasoning, tools, chat_format)
         stop_reason, stop_sequence = messages_api.stop_reason("tool_calls" if calls else reason, detok.stop_hit)
         return {"id": mid, "type": "message", "role": "assistant", "model": model,
                 "content": messages_api.content_blocks(reasoning, content, calls),
@@ -760,9 +765,17 @@ def _tool_arguments_as_objects(messages: list[dict]) -> list[dict]:
     return out
 
 
-def _split_chat(text: str, in_reasoning: bool, tools: list | None) -> tuple[str, str, list[dict]]:
+def _chat_parser(chat_format: str, in_reasoning: bool, tools: list | None):
+    """The reply parser of the target's chat format (`Target.chat_format`)."""
+    if chat_format == "inkling":
+        from hibana.api.parsers.inkling import InklingParser
+        return InklingParser(in_reasoning, tools=bool(tools))
+    return ReasoningParser(in_reasoning, tools=bool(tools))
+
+
+def _split_chat(text: str, in_reasoning: bool, tools: list | None, chat_format: str = "qwen") -> tuple[str, str, list[dict]]:
     """Complete chat output as (reasoning, content, tool_calls)."""
-    rp = ReasoningParser(in_reasoning, tools=bool(tools))
+    rp = _chat_parser(chat_format, in_reasoning, tools)
     rp.feed(text)
     rp.finish()
     content, calls = (parse_tool_calls(rp.content, tools) if tools else (rp.content, []))
@@ -824,7 +837,7 @@ def serve(host: str, port: int, log=print, spec: int = 0, proposer: str = "mtp",
     from hibana.engine.scheduler import SchedulerConfig
     snap = served.snapshot_dir()
     tok = SnapshotTokenizer(snap)
-    tmpl = ChatTemplate(snap, served.template_defaults)
+    tmpl = ChatTemplate(snap, served.template_defaults, served.chat_format)
     log(f"loading {served.name}: {served.model_id}@{served.model_revision[:8]}")
     model = targets.load_model(served, snap, log=log)
     from hibana.engine.config import current

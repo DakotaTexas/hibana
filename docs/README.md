@@ -14,6 +14,7 @@ behavior, update its page in the same pull request (`python3 tools/check_links.p
 | [Flash-Next](flashnext.md) | Qwen3.8-Flash-Next: model, package, conventions, sparse attention, its MTP and DFlash2 drafts |
 | [Nemotron](nemotron.md) | Nemotron 3.5 Super: the Mamba-2 and latent-MoE model as served, formats, its MTP draft |
 | [Nemotron Bolt](bolt.md) | Packed IQ2/Q8/NVFP4 text inference on the Nemotron Mamba runtime |
+| [Inkling 2 Mini](inkling.md) | The looped MoE model as served: layer visits, state, the decode kernels, chat format |
 | [Tensor parallel](tensor-parallel.md) | Two Sparks: setup, sharding, the RDMA all-reduce, limits |
 | [3-bit calibration](w3-calibration.md) | Fitting and serving the calibrated 3-bit copies |
 | [Evaluation](evaluation.md) | Measuring a build or a change, the lossy-change gate, nightly and weekly GB10 checks |

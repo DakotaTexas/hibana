@@ -21,9 +21,11 @@ CHECKOUT = Path(__file__).resolve().parents[2]  # the repository root when hiban
 ALIASES = {"27b": "qwen38", "27B": "qwen38", "qwen38": "qwen38", "qwen3.8-27b": "qwen38",
            "flashnext": "flashnext", "flash-next": "flashnext", "Flash-Next": "flashnext",
            "nemotron": "nemotron", "nemotron-super": "nemotron", "Nemotron": "nemotron",
-           "bolt": "bolt", "nemotron-bolt": "bolt"}
-TARGET_CHOICES = ("27b", "flashnext", "nemotron", "bolt", "qwen38", "flash-next", "nemotron-super", "nemotron-bolt")
-SERVED = ("27b", "flashnext", "nemotron", "bolt")  # one name per target, in the order `status`, `stop` and the clients look
+           "bolt": "bolt", "nemotron-bolt": "bolt",
+           "inkling": "inkling", "inkling-2-mini": "inkling", "Inkling": "inkling"}
+TARGET_CHOICES = ("27b", "flashnext", "nemotron", "bolt", "inkling", "qwen38", "flash-next", "nemotron-super", "nemotron-bolt",
+                  "inkling-2-mini")
+SERVED = ("27b", "flashnext", "nemotron", "bolt", "inkling")  # one name per target, in the order `status`, `stop` and the clients look
 SERVE_HINT = "hibana serve " + ", ".join(SERVED[:-1]) + " or " + SERVED[-1]  # what to run when nothing is serving
 
 # What each target serves when nothing else says so (port, service, drafter: the HIBANA_* keys), and what the launcher
@@ -49,6 +51,10 @@ TARGET_SETTINGS = {
     "bolt": {"HIBANA_SERVICE": "hibana-bolt", "HIBANA_PORT": "30006", "HIBANA_PROPOSER": "dflash2",
              "HIBANA_DRAFT": "pinned", "HIBANA_DRAFT_PRECISION": "bf16", "HIBANA_VERIFY_STATE": "reconstruct",
              "HIBANA_VISION": "1", "recurrence": "mamba2", "w3_calibrated_only": True},
+    # its bundled DSpark drafter (a block of seven; the profile says how many a round verifies), text only. No layer
+    # is recurrent, so there is nothing to reconstruct: verification keeps each row's convolution windows (snapshots)
+    "inkling": {"HIBANA_SERVICE": "hibana-inkling", "HIBANA_PORT": "30007", "HIBANA_PROPOSER": "dspark", "HIBANA_SPEC": "7",
+                "HIBANA_VERIFY_STATE": "snapshots"},
 }
 # The recurrent-state formats each recurrence stores (HIBANA_SSM_STATE, cache/ssm_format.py): the per-window integer
 # formats on both, Mamba-2's FP16 with stochastic rounding.
@@ -101,6 +107,28 @@ def profile_defaults(profile: str, target: str, flashnext_experts: str = "w3", t
         return p
     if target == "nemotron":
         return nemotron_defaults(profile)
+    if target == "inkling":
+        if profile not in PROFILE_NAMES:
+            raise ValueError(f"unknown serving profile {profile!r} (choose from {', '.join(PROFILE_NAMES)})")
+        # Every profile verifies DSpark's drafts exactly. A round verifies the first 3 of the 7: a verified row costs
+        # its own experts, and drafts past the third are rarely reached; depth by acceptance up to 7
+        # (HIBANA_SPEC_STEP_COST) was within noise of it. Past four requests plain decode wins. Served tok/s over the
+        # 18 h2h prompts (thinking off, to 1,024 tokens), one request greedy / T 0.7 (median), then 2 / 4 closed-loop
+        # streams in all: BF16 trunk with the drafter 56.6 / 51.7, 72.7 / 99.9, without 39.6 / 38.9, 61.0 / 85.7; FP8
+        # trunk with the drafter 68.5 / 65.7, 84.5 / 109.9. The SSD tier is unmeasured with the visits' convolution
+        # windows.
+        p = {"HIBANA_SPEC": "7", "HIBANA_SPEC_DEPTHS": "1:3,2:3,4:3,8:0,16:0", "HIBANA_W3_DECODE": "0", "HIBANA_ACCEPT_DEFAULT": "off",
+             "HIBANA_ACCEPT_SOFT": "0", "HIBANA_DEVICE_ACCEPT": "0", "HIBANA_MAX_BATCH": "4", "HIBANA_SSD": "0",
+             "HIBANA_INKLING_TRUNK": "bf16"}
+        if profile == "exact":
+            return p
+        # fast, throughput: the attention projections and the vocabulary head in FP8 (the checkpoint's are BF16): a decode
+        # token streams 3.6 GB of weights instead of 5.4. GSM8K-200, four at a time: 95.5% against exact's 96.0%. The
+        # lossy-change gate has not run on it: its in-process layers frame prompts for the Qwen targets.
+        p["HIBANA_INKLING_TRUNK"] = "fp8"
+        if profile == "throughput":
+            p["HIBANA_MAX_BATCH"] = "16"
+        return p
     flashnext = target == "flashnext"
     if profile == "exact":
         p = {"HIBANA_ACCEPT_DEFAULT": "off", "HIBANA_ACCEPT_SOFT": "0", "HIBANA_W3_DECODE": "0", "HIBANA_DEVICE_ACCEPT": "0"}
@@ -225,7 +253,7 @@ def target_name(name: str | None) -> str:
     try:
         return ALIASES[name or "qwen38"]
     except KeyError:
-        raise ValueError(f"unknown target {name!r} (choose 27b, flashnext, nemotron or bolt)") from None
+        raise ValueError(f"unknown target {name!r} (choose 27b, flashnext, nemotron, bolt or inkling)") from None
 
 
 def model_config(name: str):
@@ -236,6 +264,8 @@ def model_config(name: str):
         from hibana.model.flashnext import config as c
     elif name == "nemotron":
         from hibana.model.nemotron import config as c
+    elif name == "inkling":
+        from hibana.model.inkling import config as c
     else:
         from hibana.model import qwen38_config as c
     return c
@@ -479,7 +509,14 @@ def resolve(target: str | None = None, profile: str | None = None, overrides: di
                "Bolt has no in-checkpoint MTP; use LiLiCorr DFlash2 at depth 1..7, or HIBANA_SPEC=0")
         _check(precision == "bf16", "Bolt LiLiCorr uses its published W4A16/BF16 draft weights")
         _check(kv_format in ("fp8", "sim-bf16"), "Bolt supports FP8 KV or sim-bf16 for parity")
-    _check(proposer in ("mtp", "dflash2"), f"HIBANA_PROPOSER must be mtp or dflash2 (got {proposer!r})")
+    if name == "inkling":
+        _check(spec == 0 or (proposer == "dspark" and spec == 7),
+               "Inkling drafts with its bundled DSpark, a block of 7 (HIBANA_SPEC=7; HIBANA_SPEC_DEPTHS says how many a round verifies), or HIBANA_SPEC=0")
+        _check(values.get("HIBANA_VERIFY_STATE", "snapshots") == "snapshots", "Inkling verifies with HIBANA_VERIFY_STATE=snapshots (it has no recurrent state to reconstruct)")
+        _check(kv_format in ("fp8", "sim-bf16"), "Inkling supports FP8 KV or sim-bf16 (the checkpoint's unquantized cache)")
+        _check(values.get("HIBANA_INKLING_TRUNK", "bf16") in ("bf16", "fp8"), "HIBANA_INKLING_TRUNK must be bf16 or fp8")
+    _check(proposer in ("mtp", "dflash2", "dspark"), f"HIBANA_PROPOSER must be mtp, dflash2 or dspark (got {proposer!r})")
+    _check((proposer == "dspark") == (name == "inkling"), "HIBANA_PROPOSER=dspark is Inkling's drafter, and Inkling's only one")
     _check(precision != "fp8" or (spec and proposer == "dflash2"), "FP8 draft precision requires enabled DFlash2 speculation")
     if values.get("HIBANA_SPEC_POLICY") == "budget":
         _check(name == "qwen38" and spec and proposer == "dflash2",

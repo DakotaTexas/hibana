@@ -117,6 +117,23 @@ uv run hibana serve bolt                # http://127.0.0.1:30006
 
 </details>
 
+<details>
+<summary><h3>Inkling 2 Mini</h3></summary>
+
+Thinking Machines' 26B looped mixture-of-experts model (3.4B active; the middle layers run three passes a token), on
+one Spark. Text only.
+
+```bash
+uv run hibana serve inkling             # http://127.0.0.1:30007
+```
+
+- **Download:** 20 GB
+- **Draft:** its bundled DSpark drafter
+- **Checkpoint:** [thinkingmachines/Inkling-2-Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini)
+- **More:** [Inkling 2 Mini](docs/inkling.md)
+
+</details>
+
 Not sure which to pick? Side by side:
 
 | Model | Size | Download | Sparks | Images | Command |
@@ -125,6 +142,7 @@ Not sure which to pick? Side by side:
 | Qwen3.8-27B | 27B dense | 36 GB | 1 or 2 | | `hibana serve 27b` |
 | Nemotron 3.5 Super | 120B MoE, 12B active | 124 GB | 1 | yes | `hibana serve nemotron` |
 | Nemotron 3.5 Bolt | 74B MoE, 9B active | 25 GB | 1 | yes | `hibana serve bolt` |
+| Inkling 2 Mini | 26B looped MoE, 3.4B active | 20 GB | 1 | | `hibana serve inkling` |
 
 ## Requirements
 
@@ -140,7 +158,7 @@ Not sure which to pick? Side by side:
 
 | | |
 |---|---|
-| `hibana serve <model>` | Serve a model in the foreground (`27b`, `flashnext`, `nemotron`, `bolt`) |
+| `hibana serve <model>` | Serve a model in the foreground (`27b`, `flashnext`, `nemotron`, `bolt`, `inkling`) |
 | `hibana serve <model> --detach` | The same as a background service; `hibana stop`, `hibana logs -f` |
 | `hibana serve <model> --exact` | The model's own outputs, for benchmarks (the default `fast` profile is faster and slightly lossy; also `--throughput`) |
 | `hibana serve <model> --tp 2` | The Qwen models on two Sparks linked by their ConnectX ports ([tensor parallel](docs/tensor-parallel.md)) |
@@ -157,7 +175,7 @@ For more details:
 - [Operations](docs/operations.md): settings, serving profiles and the SSD tier
 - [API](docs/api.md): endpoints, tool calls, images and constrained output
 - [Tensor parallel](docs/tensor-parallel.md): serving on two Sparks
-- Models: [Flash-Next](docs/flashnext.md), [Nemotron Super](docs/nemotron.md), [Nemotron Bolt](docs/bolt.md)
+- Models: [Flash-Next](docs/flashnext.md), [Nemotron Super](docs/nemotron.md), [Nemotron Bolt](docs/bolt.md), [Inkling 2 Mini](docs/inkling.md)
 - [Evaluation](docs/evaluation.md): measuring quality and speed
 - [All documentation](docs/README.md) and [contributing](CONTRIBUTING.md)
 
