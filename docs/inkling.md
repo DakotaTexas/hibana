@@ -50,7 +50,7 @@ visit to its layer and pass): a visit is what holds per-request state.
 ## State
 
 - **K/V.** Every visit writes its own K/V, so the KV pool has 48 layers of one geometry: 96 KiB a token in FP8
-  (`HIBANA_KV_FORMAT=sim-bf16` keeps the checkpoint's unquantized cache). Sliding-window visits keep their K/V for
+  (the accuracy screen's `HIBANA_KV_FORMAT=sim-bf16` keeps it in BF16, for parity checks). Sliding-window visits keep their K/V for
   the whole prompt too, though they read the last 1,024 tokens: a cached prefix then resumes at any position.
 - **Convolution windows.** A visit's four streams keep their last three inputs: 1.83 MiB a slot
   (`StatePool` aux `inkling_conv`, `Target.slot_state_bytes`), snapshotted like a recurrent state.

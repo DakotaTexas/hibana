@@ -513,7 +513,7 @@ def resolve(target: str | None = None, profile: str | None = None, overrides: di
         _check(spec == 0 or (proposer == "dspark" and spec == 7),
                "Inkling drafts with its bundled DSpark, a block of 7 (HIBANA_SPEC=7; HIBANA_SPEC_DEPTHS says how many a round verifies), or HIBANA_SPEC=0")
         _check(values.get("HIBANA_VERIFY_STATE", "snapshots") == "snapshots", "Inkling verifies with HIBANA_VERIFY_STATE=snapshots (it has no recurrent state to reconstruct)")
-        _check(kv_format in ("fp8", "sim-bf16"), "Inkling supports FP8 KV or sim-bf16 (the checkpoint's unquantized cache)")
+        _check(kv_format in ("fp8", "sim-bf16"), "Inkling supports FP8 KV, or sim-bf16 for parity")
         _check(values.get("HIBANA_INKLING_TRUNK", "bf16") in ("bf16", "fp8"), "HIBANA_INKLING_TRUNK must be bf16 or fp8")
     _check(proposer in ("mtp", "dflash2", "dspark"), f"HIBANA_PROPOSER must be mtp, dflash2 or dspark (got {proposer!r})")
     _check((proposer == "dspark") == (name == "inkling"), "HIBANA_PROPOSER=dspark is Inkling's drafter, and Inkling's only one")
