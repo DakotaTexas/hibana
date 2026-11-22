@@ -41,7 +41,7 @@ def _fold(x, G: tl.constexpr, N: tl.constexpr):
 @triton.jit
 def _score_kernel(Q, Aux, Table, Base, Pos, Out, stride_qr, stride_qh, stride_page, key_offset, stride_or, gcap, scale,
                   RATIO: tl.constexpr, HEADS: tl.constexpr, DIM: tl.constexpr, BLOCK_G: tl.constexpr):
-    # The FP32 order is spelled out (csrc/score_exact.cu's), not left to tl.sum: Triton 3.8 changed its in-thread order.
+    # The FP32 order is spelled out (csrc/score_exact.cu's), not tl.sum's: faster, and the same on any Triton version.
     tl.static_assert(DIM == 128)
     row = tl.program_id(0)
     g = tl.program_id(1) * BLOCK_G + tl.arange(0, BLOCK_G)

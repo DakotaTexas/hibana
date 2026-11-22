@@ -4,8 +4,8 @@
 // it): 16 lanes of 8 dimensions, each lane summing its 8 in order (the first a product, then FMAs; BF16 products are
 // exact in FP32, so an FMA rounds as a product and an add would), and the 16 lane sums meet in a butterfly that adds
 // lanes 8 apart first, then 4, 2 and 1. Each head's sum is relu'd and added to an FP32 accumulator from +0 in head
-// order, then scaled. This kernel evaluates the same tree per (row, group) in one thread, so every score has the same
-// bits; tests/gpu/test_qsa_exact.py checks them against the Triton kernel.
+// order, then scaled. This kernel evaluates the same tree per (row, group) in one thread; tests/gpu/test_qsa_exact.py
+// holds both to the float64 math.
 #include <cuda_runtime.h>
 #include <cuda_bf16.h>
 #include <math_constants.h>

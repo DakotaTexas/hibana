@@ -6,7 +6,7 @@ All production QSA kernels live in this package:
 - `selection.py`: the `original` path's graph-safe scorer, Torch top-k and page assembly (called by
   `FlashNextIndexer.select` in `hibana/model/flashnext/indexer.py`).
 - `score_exact.py`: the `original` selection's eager-prefill kernels on SM121 (`csrc/score_exact.cu`): the same
-  scores, bit for bit, and the same pages.
+  scores and pages.
 - `prefill.py`: optimized eager-prefill adapter and per-forward planning.
 - `query_prep.py`, `compression.py`, `maintenance_plan.py`: fused index maintenance.
 - `tiled_scaled.py`: optimized tiled scorer.
@@ -78,7 +78,7 @@ On SM121, eager prefill rows that take the `original` selection (every row under
 chunks past 32K under `auto`) run `score_exact.py` instead of the Triton scorer and Torch top-k, with the same result:
 
 1. **Scoring (CUDA):** the Triton `_score_kernel`'s FP32 order, which that kernel spells out instead of leaving it
-   to `tl.sum` (Triton 3.8 changed tl.sum's in-thread order): 8 dimensions a lane over 16 lanes, each lane summing
+   to `tl.sum` (faster, and the same on every Triton version): 8 dimensions a lane over 16 lanes, each lane summing
    its 8 products in order (BF16 products are exact in FP32, so a product followed by FMAs rounds as products and
    adds would), the lane sums meet in a butterfly (lanes 8 apart first, then 4, 2, 1), and the heads' relu'd sums
    are added from +0 in head order, then scaled.
@@ -92,9 +92,9 @@ chunks past 32K under `auto`) run `score_exact.py` instead of the Triton scorer 
    shared memory, where three more radix passes find the exact threshold. A bin of more than 4,096 scores is
    resolved over the row instead, and a tie at the threshold is cut in group order by one more ordered pass.
 
-`tests/gpu/test_qsa_exact.py` checks the scores' bits against the Triton kernel and the pages against
-`select_pages` (ties, zeros, crowded bins, partly visible rows, several sequences), and the attention output
-through the indexer.
+`tests/gpu/test_qsa_exact.py` holds both scorers to the float64 math (to FP32 rounding) and both selections to
+its top-k (up to near-ties at the cutoff) over several sequences and partly visible rows, the top-k to Torch's
+(ties, zeros, crowded bins), and the attention output through the indexer.
 
 Plans are shared across layers through the forward's side inputs, not persisted
 in a model or cache. Both backends use the same physical FP8 K/V and interleaved

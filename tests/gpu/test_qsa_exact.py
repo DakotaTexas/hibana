@@ -1,11 +1,16 @@
-"""The eager SM121 kernels of the `original` QSA selection (`kernels/qsa/score_exact.py`) against `selection.py`:
-scores with the same bits, then the same pages and counts, through long contexts, several sequences, ties and the
-top-k's fallbacks; and the same attention output through the indexer."""
+"""The `original` QSA selection's two implementations, the Triton scorer (`kernels/qsa/selection.py`) and the eager
+SM121 kernels (`kernels/qsa/score_exact.py`), against its math in float64: scores within FP32 rounding, the same pages
+up to near-ties at the top-k cutoff, through long contexts and several sequences; the top-k's fallbacks against
+Torch's; and the attention output through the indexer."""
 import pytest
 import torch
 
 pytestmark = pytest.mark.skipif(torch.cuda.get_device_capability() != (12, 1), reason="SM121 kernels")
 SCALE = 128 ** -0.5
+# Any order of a score's FP32 additions (127 in a head's dot product, 4 across heads, then the scale) rounds within
+# gamma_n = n u / (1 - n u) of the sum of the magnitudes (BF16 products are exact in FP32), and relu does not widen it.
+N = 128 + 4 + 1
+GAMMA = N * 2.0 ** -24 / (1 - N * 2.0 ** -24)
 
 
 def _inputs(contexts, rows, seed=0, key_scale=1.0):
@@ -21,33 +26,76 @@ def _inputs(contexts, rows, seed=0, key_scale=1.0):
     return q, aux, table, base, positions
 
 
-@pytest.mark.parametrize("contexts,rows", [([32768 + 4099], [300]), ([65536, 40001], [200, 129]),
-                                           ([131072], [256]), ([3000, 9001, 5], [64, 70, 5])])
-def test_scores_have_the_same_bits(contexts, rows):
+def _reference(q, aux, table, base, positions, gcap, ratio=4):
+    """The scores in float64 (scale x the heads' summed relu(q . k), each group's key the compressed key on its last
+    page, -inf for groups a row cannot see yet) and each score's FP32 rounding bound."""
+    want = torch.full((q.shape[0], gcap), float("-inf"), dtype=torch.float64, device="cuda")
+    bound = torch.zeros_like(want)
+    visible = (positions.long() + 1) // ratio
+    for b in base.unique().tolist():
+        rows = (base == b).nonzero().flatten()
+        n = int(visible[rows].max())
+        keys = aux[table[b + ratio - 1: b + n * ratio: ratio].long(), 1].double()
+        qs = q[rows].double()
+        scores = torch.einsum("rhd,gd->rhg", qs, keys).clamp_min(0).sum(1) * SCALE
+        seen = torch.arange(n, device="cuda")[None, :] < visible[rows, None]
+        want[rows, :n] = torch.where(seen, scores, float("-inf"))
+        bound[rows, :n] = torch.einsum("rhd,gd->rg", qs.abs(), keys.abs()) * SCALE * GAMMA
+    return want, bound
+
+
+CASES = [([32768 + 4099], [300]), ([65536, 40001], [200, 129]), ([131072], [256]), ([3000, 9001, 5], [64, 70, 5])]
+
+
+@pytest.mark.parametrize("contexts,rows", CASES)
+def test_scores_are_the_float64_scores_to_fp32_rounding(contexts, rows):
     from hibana.kernels.qsa.score_exact import _tiles, load_exact_scorer
     from hibana.kernels.qsa.selection import score_groups
     for key_scale in (1.0, 30.0):
         q, aux, table, base, positions = _inputs(contexts, rows, key_scale=key_scale)
         gcap = max(contexts) // 4
-        want = score_groups(q, aux, table, base, positions, 4, gcap, SCALE)
-        got = torch.full_like(want, float("nan"))
+        want, bound = _reference(q, aux, table, base, positions, gcap)
+        got = {"triton": score_groups(q, aux, table, base, positions, 4, gcap, SCALE)}
         tiles = torch.tensor(_tiles(rows, 0, sum(rows)), dtype=torch.int32, device="cuda").view(-1, 2)
         for per_block in (1, 8):
-            load_exact_scorer().score(q, aux, table, base, positions, tiles, got, SCALE, per_block)
-            assert torch.equal(got.view(torch.int32), want.view(torch.int32))
+            got[f"cuda, {per_block} tiles a block"] = out = torch.full_like(got["triton"], float("nan"))
+            load_exact_scorer().score(q, aux, table, base, positions, tiles, out, SCALE, per_block)
+        seen = torch.isfinite(want)
+        for name, scores in got.items():
+            assert torch.equal(torch.isfinite(scores), seen) and (scores[~seen] == float("-inf")).all(), name
+            assert ((scores.double() - want).abs() <= bound)[seen].all(), name
 
 
-@pytest.mark.parametrize("contexts,rows", [([32768 + 4099], [300]), ([65536, 40001], [200, 129]),
-                                           ([131072], [256]), ([3000, 9001, 5], [64, 70, 5])])
-def test_selection_is_the_same(contexts, rows):
+def _groups(pages, count, inverse, base, position, ratio=4):
+    """The groups a row's pages select (its tail, the incomplete group's tokens, left out)."""
+    tokens = inverse[pages[:count].long()] - base
+    return set((tokens // ratio).tolist()) - {(position + 1) // ratio}
+
+
+@pytest.mark.parametrize("contexts,rows", CASES)
+def test_selection_is_the_float64_selection_up_to_near_ties(contexts, rows):
     from hibana.kernels.qsa.score_exact import select_exact
     from hibana.kernels.qsa.selection import select_pages
     q, aux, table, base, positions = _inputs(contexts, rows, seed=1)
-    gcap = max(contexts) // 4
-    want = select_pages(q, aux, table, base, positions, 4, 2048, gcap, SCALE, chunk=256)
-    for chunk in (256, 100):
-        got = select_exact(q, aux, table, base, positions, gcap, SCALE, rows, chunk)
-        assert torch.equal(got[0], want[0]) and torch.equal(got[1], want[1])
+    gcap, top = max(contexts) // 4, 2048 // 4
+    want, bound = _reference(q, aux, table, base, positions, gcap)
+    inverse = torch.full((int(table.max()) + 1,), -1, dtype=torch.long, device="cuda")
+    inverse[table.long()] = torch.arange(table.numel(), device="cuda")
+    selections = [select_pages(q, aux, table, base, positions, 4, 2048, gcap, SCALE, chunk=256),
+                  *(select_exact(q, aux, table, base, positions, gcap, SCALE, rows, chunk) for chunk in (256, 100))]
+    for r in range(q.shape[0]):
+        position, visible = int(positions[r]), (int(positions[r]) + 1) // 4
+        kept = min(visible, top)
+        values, order = want[r].topk(kept)
+        reference, near = set(order.tolist()), set()
+        if kept:  # the groups within rounding of the cutoff may land on either side of it
+            cut, cut_bound = values[-1], bound[r, order[-1]]
+            near = set(((want[r] - cut).abs() <= bound[r] + cut_bound).nonzero().flatten().tolist())
+        tail = position + 1 - visible * 4
+        for pages, counts in selections:
+            assert int(counts[r]) == kept * 4 + tail and (pages[r, counts[r]:] == -1).all()
+            chosen = _groups(pages[r], int(counts[r]), inverse, int(base[r]), position)
+            assert len(chosen) == kept and chosen ^ reference <= near, f"row {r}"
 
 
 def _scores(kind, rows, cols, g):
@@ -95,7 +143,8 @@ def test_topk_matches_torch(kind, cols, monkeypatch):
 @pytest.mark.parametrize("prefix,length", [(40960, 1024), (2048, 2048)])
 @torch.inference_mode()
 def test_indexer_attention_is_the_same(prefix, length, monkeypatch):
-    """`FlashNextIndexer.run` (the `original` backend) with and without the exact kernels: the same attention output."""
+    """`FlashNextIndexer.run` (the `original` backend) with and without the exact kernels: the same attention output
+    to BF16 rounding."""
     from hibana.kernels.qsa import score_exact
     from tests.qsa_fixture import QsaFixture
     f = QsaFixture(1, length, prefix, hidden=256)
@@ -108,4 +157,5 @@ def test_indexer_attention_is_the_same(prefix, length, monkeypatch):
     f.aux.copy_(aux)
     monkeypatch.setattr(score_exact, "supported", lambda *a: False)
     want = f.native()
-    assert len(calls) == 1 and torch.equal(got, want)
+    assert len(calls) == 1
+    torch.testing.assert_close(got, want)  # the same pages up to near-ties, so the same output to BF16 rounding

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """The `original` selection's scores and selection with faster kernels and the same result, for eager prefill on SM121.
 
-`csrc/score_exact.cu` computes `selection._score_kernel`'s scores bit for bit (the same FP32 order), 64 query rows
+`csrc/score_exact.cu` computes `selection._score_kernel`'s scores in the same FP32 order, 64 query rows
 of one sequence per block sharing each compressed key. Its top-k keeps `topk_pages.cu`'s selection for rows of any
 length: the 512 largest by score, then ascending group index, which is the order Torch's top-k returns them in for
 `select_pages` (a stable sort; checked in tests/gpu/test_qsa_exact.py), and assembles the pages as
