@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // QSA group scores with the `original` scorer's arithmetic (selection.py `_score_kernel`), tiled so a block reuses
-// each compressed key across 64 query rows. That kernel's layout (Triton 3.7: [64 groups, 128] keys, size per thread
-// [1, 8], 16 lanes along the dimension) fixes its FP32 order: each lane sums its 8 dimensions in order (the first a
-// product, then FMAs; BF16 products are exact in FP32, so an FMA rounds as a product and an add would), and the
-// 16 lane sums meet in a butterfly that adds lanes 8 apart first, then 4, 2 and 1. Each head's sum is relu'd and
-// added to an FP32 accumulator from +0 in head order, then scaled. This kernel evaluates the same tree per
-// (row, group) in one thread, so every score has the same bits; tests/gpu/test_qsa_exact.py checks them against
-// the Triton kernel.
+// each compressed key across 64 query rows. That kernel spells out its FP32 order (the one Triton 3.7's tl.sum gave
+// it): 16 lanes of 8 dimensions, each lane summing its 8 in order (the first a product, then FMAs; BF16 products are
+// exact in FP32, so an FMA rounds as a product and an add would), and the 16 lane sums meet in a butterfly that adds
+// lanes 8 apart first, then 4, 2 and 1. Each head's sum is relu'd and added to an FP32 accumulator from +0 in head
+// order, then scaled. This kernel evaluates the same tree per (row, group) in one thread, so every score has the same
+// bits; tests/gpu/test_qsa_exact.py checks them against the Triton kernel.
 #include <cuda_runtime.h>
 #include <cuda_bf16.h>
 #include <math_constants.h>

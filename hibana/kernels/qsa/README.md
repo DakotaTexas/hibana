@@ -77,10 +77,11 @@ optimized policy surface to the caller without silently retrying another backend
 On SM121, eager prefill rows that take the `original` selection (every row under `original`, so `exact`'s; rows of
 chunks past 32K under `auto`) run `score_exact.py` instead of the Triton scorer and Torch top-k, with the same result:
 
-1. **Scoring (CUDA):** the Triton `_score_kernel`'s FP32 order, made explicit. Triton 3.7 lays its [64 groups, 128]
-   key tile out 8 dimensions a lane over 16 lanes: each lane sums its 8 products in order (BF16 products are exact
-   in FP32, so a product followed by FMAs rounds as products and adds would), the lane sums meet in a butterfly
-   (lanes 8 apart first, then 4, 2, 1), and the heads' relu'd sums are added from +0 in head order, then scaled.
+1. **Scoring (CUDA):** the Triton `_score_kernel`'s FP32 order, which that kernel spells out instead of leaving it
+   to `tl.sum` (Triton 3.8 changed tl.sum's in-thread order): 8 dimensions a lane over 16 lanes, each lane summing
+   its 8 products in order (BF16 products are exact in FP32, so a product followed by FMAs rounds as products and
+   adds would), the lane sums meet in a butterfly (lanes 8 apart first, then 4, 2, 1), and the heads' relu'd sums
+   are added from +0 in head order, then scaled.
    One thread evaluates that tree for each of its 4 x 4 (row, group) outputs, from FP32 tiles of 64 rows (one
    sequence) and 64 compressed keys in shared memory, so each key load serves 64 rows instead of one. A block
    scores 8 key tiles; the next head's queries, or the next tile's keys, load into registers while a head computes.
@@ -93,7 +94,7 @@ chunks past 32K under `auto`) run `score_exact.py` instead of the Triton scorer 
 
 `tests/gpu/test_qsa_exact.py` checks the scores' bits against the Triton kernel and the pages against
 `select_pages` (ties, zeros, crowded bins, partly visible rows, several sequences), and the attention output
-through the indexer. A Triton upgrade that changed `_score_kernel`'s layout would fail the first check.
+through the indexer.
 
 Plans are shared across layers through the forward's side inputs, not persisted
 in a model or cache. Both backends use the same physical FP8 K/V and interleaved
