@@ -41,8 +41,6 @@ def _fold(x, G: tl.constexpr, N: tl.constexpr):
 @triton.jit
 def _score_kernel(Q, Aux, Table, Base, Pos, Out, stride_qr, stride_qh, stride_page, key_offset, stride_or, gcap, scale,
                   RATIO: tl.constexpr, HEADS: tl.constexpr, DIM: tl.constexpr, BLOCK_G: tl.constexpr):
-    # The FP32 order is spelled out (csrc/score_exact.cu's), not tl.sum's: faster, and the same on any Triton version.
-    tl.static_assert(DIM == 128)
     row = tl.program_id(0)
     g = tl.program_id(1) * BLOCK_G + tl.arange(0, BLOCK_G)
     visible = (tl.load(Pos + row).to(tl.int32) + 1) // RATIO
@@ -53,21 +51,27 @@ def _score_kernel(Q, Aux, Table, Base, Pos, Out, stride_qr, stride_qh, stride_pa
         page = tl.load(Table + base + (g * RATIO + RATIO - 1).to(tl.int64), mask=live, other=0).to(tl.int64)
         d = tl.arange(0, DIM)
         k = tl.load(Aux + page[:, None] * stride_page + key_offset + d[None, :], mask=live[:, None], other=0.0).to(tl.float32)
-        k0, k1, k2, k3, k4, k5, k6, k7 = _eighths(tl.reshape(k, (BLOCK_G, 16, 2, 2, 2)))
+        # At width 128 (score_exact.cu's), the FP32 order is spelled out instead of tl.sum's: faster, and the same on
+        # any Triton version. Other widths keep tl.sum.
+        if DIM == 128:
+            k0, k1, k2, k3, k4, k5, k6, k7 = _eighths(tl.reshape(k, (BLOCK_G, 16, 2, 2, 2)))
         acc = tl.zeros((BLOCK_G,), tl.float32)
         for h in tl.static_range(HEADS):
             q = tl.load(Q + row * stride_qr + h * stride_qh + d).to(tl.float32)
-            q0, q1, q2, q3, q4, q5, q6, q7 = _eighths(tl.reshape(q, (16, 2, 2, 2)))
-            p = k0 * q0[None, :]
-            p = tl.fma(k1, q1[None, :], p)
-            p = tl.fma(k2, q2[None, :], p)
-            p = tl.fma(k3, q3[None, :], p)
-            p = tl.fma(k4, q4[None, :], p)
-            p = tl.fma(k5, q5[None, :], p)
-            p = tl.fma(k6, q6[None, :], p)
-            p = tl.fma(k7, q7[None, :], p)
-            p = _fold(_fold(_fold(_fold(p, BLOCK_G, 16), BLOCK_G, 8), BLOCK_G, 4), BLOCK_G, 2)
-            acc += tl.maximum(tl.reshape(p, (BLOCK_G,)), 0.0)
+            if DIM == 128:
+                q0, q1, q2, q3, q4, q5, q6, q7 = _eighths(tl.reshape(q, (16, 2, 2, 2)))
+                p = k0 * q0[None, :]
+                p = tl.fma(k1, q1[None, :], p)
+                p = tl.fma(k2, q2[None, :], p)
+                p = tl.fma(k3, q3[None, :], p)
+                p = tl.fma(k4, q4[None, :], p)
+                p = tl.fma(k5, q5[None, :], p)
+                p = tl.fma(k6, q6[None, :], p)
+                p = tl.fma(k7, q7[None, :], p)
+                p = _fold(_fold(_fold(_fold(p, BLOCK_G, 16), BLOCK_G, 8), BLOCK_G, 4), BLOCK_G, 2)
+                acc += tl.maximum(tl.reshape(p, (BLOCK_G,)), 0.0)
+            else:
+                acc += tl.maximum(tl.sum(k * q[None, :], axis=1), 0.0)
         out = tl.where(live, acc * scale, out)
     tl.store(Out + row * stride_or + g, out, mask=g < gcap)
 

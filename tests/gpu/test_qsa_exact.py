@@ -7,26 +7,29 @@ import torch
 
 pytestmark = pytest.mark.skipif(torch.cuda.get_device_capability() != (12, 1), reason="SM121 kernels")
 SCALE = 128 ** -0.5
-# Any order of a score's FP32 additions (127 in a head's dot product, 4 across heads, then the scale) rounds within
-# gamma_n = n u / (1 - n u) of the sum of the magnitudes (BF16 products are exact in FP32), and relu does not widen it.
-N = 128 + 4 + 1
-GAMMA = N * 2.0 ** -24 / (1 - N * 2.0 ** -24)
 
 
-def _inputs(contexts, rows, seed=0, key_scale=1.0):
+def gamma(dim, heads=4):
+    """Any order of a score's FP32 additions (dim - 1 in a head's dot product, the heads, then the scale) rounds within
+    gamma_n = n u / (1 - n u) of the sum of the magnitudes (BF16 products are exact in FP32); relu does not widen it."""
+    n = dim + heads + 1
+    return n * 2.0 ** -24 / (1 - n * 2.0 ** -24)
+
+
+def _inputs(contexts, rows, seed=0, key_scale=1.0, dim=128):
     """Rows ending each sequence of `contexts`, on scrambled pages of one pool."""
     g = torch.Generator(device="cuda").manual_seed(seed)
     total = sum(contexts)
-    aux = (torch.randn(total + 8, 2, 128, generator=g, device="cuda") * key_scale).to(torch.bfloat16)
+    aux = (torch.randn(total + 8, 2, dim, generator=g, device="cuda") * key_scale).to(torch.bfloat16)
     table = (torch.randperm(total + 8, generator=g, device="cuda")[:total]).to(torch.int32)
     offsets = torch.tensor([0] + list(contexts), device="cuda").cumsum(0)[:-1]
     positions = torch.cat([torch.arange(c - r, c, device="cuda") for c, r in zip(contexts, rows)])
     base = torch.repeat_interleave(offsets, torch.tensor(rows, device="cuda")).to(torch.int32)
-    q = torch.randn(sum(rows), 4, 128, generator=g, device="cuda").to(torch.bfloat16)
+    q = torch.randn(sum(rows), 4, dim, generator=g, device="cuda").to(torch.bfloat16)
     return q, aux, table, base, positions
 
 
-def _reference(q, aux, table, base, positions, gcap, ratio=4):
+def _reference(q, aux, table, base, positions, gcap, ratio=4, scale=SCALE):
     """The scores in float64 (scale x the heads' summed relu(q . k), each group's key the compressed key on its last
     page, -inf for groups a row cannot see yet) and each score's FP32 rounding bound."""
     want = torch.full((q.shape[0], gcap), float("-inf"), dtype=torch.float64, device="cuda")
@@ -37,10 +40,10 @@ def _reference(q, aux, table, base, positions, gcap, ratio=4):
         n = int(visible[rows].max())
         keys = aux[table[b + ratio - 1: b + n * ratio: ratio].long(), 1].double()
         qs = q[rows].double()
-        scores = torch.einsum("rhd,gd->rhg", qs, keys).clamp_min(0).sum(1) * SCALE
+        scores = torch.einsum("rhd,gd->rhg", qs, keys).clamp_min(0).sum(1) * scale
         seen = torch.arange(n, device="cuda")[None, :] < visible[rows, None]
         want[rows, :n] = torch.where(seen, scores, float("-inf"))
-        bound[rows, :n] = torch.einsum("rhd,gd->rg", qs.abs(), keys.abs()) * SCALE * GAMMA
+        bound[rows, :n] = torch.einsum("rhd,gd->rg", qs.abs(), keys.abs()) * scale * gamma(q.shape[-1], q.shape[1])
     return want, bound
 
 
@@ -66,10 +69,32 @@ def test_scores_are_the_float64_scores_to_fp32_rounding(contexts, rows):
             assert ((scores.double() - want).abs() <= bound)[seen].all(), name
 
 
+@pytest.mark.parametrize("dim", [64, 32])
+def test_triton_scorer_at_other_widths(dim):
+    """Other key widths than score_exact.cu's 128 take the Triton scorer with tl.sum: the same float64 check."""
+    from hibana.kernels.qsa.selection import score_groups
+    contexts, rows = [3000, 9001], [64, 70]
+    q, aux, table, base, positions = _inputs(contexts, rows, dim=dim)
+    gcap, scale = max(contexts) // 4, dim ** -0.5
+    want, bound = _reference(q, aux, table, base, positions, gcap, scale=scale)
+    got = score_groups(q, aux, table, base, positions, 4, gcap, scale)
+    seen = torch.isfinite(want)
+    assert torch.equal(torch.isfinite(got), seen) and (got[~seen] == float("-inf")).all()
+    assert ((got.double() - want).abs() <= bound)[seen].all()
+
+
 def _groups(pages, count, inverse, base, position, ratio=4):
-    """The groups a row's pages select (its tail, the incomplete group's tokens, left out)."""
-    tokens = inverse[pages[:count].long()] - base
-    return set((tokens // ratio).tolist()) - {(position + 1) // ratio}
+    """The groups a row's pages select (its tail, the incomplete group's tokens, left out), after checking that each
+    page appears once, each selected group brings all `ratio` of its pages, and the tail is the incomplete group's
+    tokens up to the row, in order, last."""
+    tokens = (inverse[pages[:count].long()] - base).tolist()
+    assert len(set(tokens)) == count, "a page selected twice"
+    visible = (position + 1) // ratio
+    tail = list(range(visible * ratio, position + 1))
+    assert tokens[len(tokens) - len(tail):] == tail
+    chosen = [t // ratio for t in tokens[:len(tokens) - len(tail)]]
+    assert all(chosen.count(g) == ratio for g in set(chosen)), "a group without all its pages"
+    return set(chosen)
 
 
 @pytest.mark.parametrize("contexts,rows", CASES)

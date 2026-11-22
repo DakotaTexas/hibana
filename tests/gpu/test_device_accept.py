@@ -162,6 +162,7 @@ def test_stop_tokens_and_budget_cut_identically(runtime):
     assert host[2][1][:2] == (True, 'length') and len(host[0][1]) == 5
     assert device[0] == host[0] and [f[:3] for f in device[2]] == [f[:3] for f in host[2]]
     if device[2][0][4] == host[2][0][4]:  # per-round counts can drift (test_device_round_matches_host_round)
+        assert [f[3] for f in device[2]] == [f[3] for f in host[2]]  # the emitted-token counts
         for (ssm_d, conv_d), (ssm_h, conv_h) in zip(device[1], host[1]):
             assert torch.equal(ssm_d, ssm_h) and torch.equal(conv_d, conv_h)
 
