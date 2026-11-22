@@ -49,10 +49,11 @@ def _sigmoid_exact(x):
 
 @triton.jit
 def _cast_latent(L, Y, t, stride_l, E: tl.constexpr, LAT: tl.constexpr):
-    """Row t's latent half of the fused router|fc1 GEMM output (FP32 columns E..E+LAT-1) -> BF16 Y [t, :]."""
-    cols = tl.arange(0, LAT)
-    v = tl.load(L + t * stride_l + E + cols)
-    tl.store(Y + t * LAT + cols, v.to(tl.bfloat16))
+    """Row t's latent half of the fused router|fc1 GEMM output (FP32 columns E..E+LAT-1) -> BF16 Y [t, :]; LAT 0: none."""
+    if LAT > 0:
+        cols = tl.arange(0, LAT)
+        v = tl.load(L + t * stride_l + E + cols)
+        tl.store(Y + t * LAT + cols, v.to(tl.bfloat16))
 
 
 @triton.jit
@@ -217,7 +218,7 @@ def _share_select_kernel(Score, Bits, Slots, Set, R, Budget, PerRequest, Bits2, 
 @triton.jit
 def _share_pick_kernel(Slots, Cand, P, Set, Ids, W, R, K: tl.constexpr, C: tl.constexpr, CP: tl.constexpr,
                        NW: tl.constexpr, RB: tl.constexpr, STEPS: tl.constexpr, HAS_SLOTS: tl.constexpr,
-                       KP: tl.constexpr, NONE: tl.constexpr, REPEAT: tl.constexpr):
+                       KP: tl.constexpr, NONE: tl.constexpr, REPEAT: tl.constexpr, SCALE: tl.constexpr = 1.0):
     """Flash-Next's `_route_pick_kernel` with route_topk's weight arithmetic (the warp's butterfly sum, a rounded
     division by it plus 1e-20): a row that keeps all its top k gets route_topk's weights bit for bit, so sharing
     changes a forward only where it drops an expert."""
@@ -245,13 +246,16 @@ def _share_pick_kernel(Slots, Cand, P, Set, Ids, W, R, K: tl.constexpr, C: tl.co
         v16 = tl.sum(tl.reshape(v, [RB, 2, 16]), 1)
     else:  # Bolt's top 9 pads to 16 lanes
         v16 = v
-    v8 = tl.sum(tl.reshape(v16, [RB, 2, 8]), 1)
+    if CP >= 16:
+        v8 = tl.sum(tl.reshape(v16, [RB, 2, 8]), 1)
+    else:  # Inkling's top 8
+        v8 = v
     v4 = tl.sum(tl.reshape(v8, [RB, 2, 4]), 1)
     v2 = tl.sum(tl.reshape(v4, [RB, 2, 2]), 1)
     total = tl.sum(v2, 1) + 1e-20
     smask = live[:, None] & chosen
     tl.store(Ids + rows[:, None] * K + slot, cand, mask=smask)
-    tl.store(W + rows[:, None] * K + slot, tl.math.div_rn(p, tl.zeros([RB, CP], dtype=tl.float32) + total[:, None]), mask=smask)
+    tl.store(W + rows[:, None] * K + slot, tl.math.div_rn(p, tl.zeros([RB, CP], dtype=tl.float32) + total[:, None]) * SCALE, mask=smask)
     q = tl.arange(0, KP)[None, :]
     hole = live[:, None] & (q >= used[:, None]) & (q < K)
     if REPEAT:
@@ -265,7 +269,7 @@ def _share_pick_kernel(Slots, Cand, P, Set, Ids, W, R, K: tl.constexpr, C: tl.co
 
 def route_budget(fused: torch.Tensor, bias: torch.Tensor, k: int, latent: int, keep: int, budget: int,
                  slots: torch.Tensor | None = None, steps: int = 1, per_request: int = 0, repeat: bool = True,
-                 fallback: int = 0):
+                 fallback: int = 0, scale: float = 1.0, id_dtype: torch.dtype = torch.int32):
     """Budgeted top-k over fused FP32 [R, E + latent] -> (ids [R, k], renormalized weights [R, k], BF16 latent): the
     call reads at most min(budget, per_request x real requests) distinct experts (or `budget` without
     `per_request`), more only when the rows' guaranteed top `keep` exceed it (a budget of 0: the guaranteed experts
@@ -274,7 +278,8 @@ def route_budget(fused: torch.Tensor, bias: torch.Tensor, k: int, latent: int, k
     left over (all of a padded row's) name the row's top expert (a padded row: row 0's) at weight 0, or without
     `repeat` no expert (id E). `fallback` (< keep): when the guaranteed experts' union exceeds the cap, each real row is
     guaranteed only its top `fallback` and the cap fills by routing weight (rows keep whichever of their top k the set
-    holds). Five launches, no atomics, no host sync."""
+    holds). `scale` multiplies the weights, `id_dtype` types the ids (Inkling: latent 0, its route scale, int64 ids).
+    Five launches, no atomics, no host sync."""
     from hibana.kernels.flashnext_fused import _budget_score_kernel
     r = fused.shape[0]
     e = fused.shape[1] - latent
@@ -288,7 +293,7 @@ def route_budget(fused: torch.Tensor, bias: torch.Tensor, k: int, latent: int, k
     dense = torch.empty((r, block), dtype=torch.float32, device=dev)
     score = torch.empty((block,), dtype=torch.float32, device=dev)
     chosen = torch.empty((nw,), dtype=torch.int32, device=dev)
-    ids = torch.empty((r, k), dtype=torch.int32, device=dev)
+    ids = torch.empty((r, k), dtype=id_dtype, device=dev)
     w = torch.empty((r, k), dtype=torch.float32, device=dev)
     lat = torch.empty((r, latent), dtype=torch.bfloat16, device=dev)
     sl = cand if slots is None else slots
@@ -300,7 +305,7 @@ def route_budget(fused: torch.Tensor, bias: torch.Tensor, k: int, latent: int, k
     _share_select_kernel[(nw,)](score, bits, sl, chosen, r, budget, per_request, bits2, E=e, BLOCK=block,
                                 NW=nw, RB=rb, STEPS=steps, HAS_SLOTS=slots is not None, G=fallback, num_warps=4)
     _share_pick_kernel[(triton.cdiv(r, rb),)](sl, cand, p, chosen, ids, w, r, k, NW=nw, RB=rb, num_warps=4,
-                                              KP=triton.next_power_of_2(k), NONE=e, REPEAT=repeat, **common)
+                                              KP=triton.next_power_of_2(k), NONE=e, REPEAT=repeat, SCALE=scale, **common)
     return ids, w, lat
 
 

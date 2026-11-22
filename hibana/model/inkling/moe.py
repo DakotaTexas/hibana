@@ -13,6 +13,13 @@ MXFP8. A projection is one tensor-core launch over every (row, expert) pair (`ke
 packed, on the block-scaled product): wide calls (prefill) sort the pairs by expert, so an expert's rows share its
 weights' tiles; calls of up to `kernels.MOE_ROWS` rows (decode, verification, in captured graphs) multiply each pair
 where it is, or past `prefill.GROUP_PAIRS` pairs find each expert's rows on the device, without the host's sync.
+
+Expert sharing (off by default) in decode and verification calls, as Nemotron's (`model/nemotron/moe.py`, whose
+route_budget ranks the same way: sigmoid + bias chooses, the plain sigmoid weighs): with HIBANA_MOE_KEEP=F every real
+row keeps its own top F experts, and its other top-8 experts ride along when they are in the call's set, which
+HIBANA_MOE_BUDGET=[P:]B grows past the floors' union by routing weight up to min(B, P x requests). A row's weights
+renormalize over its kept experts, times ROUTE_SCALE; its leftover slots name its top expert at weight 0, which the
+row reads anyway (a graph's padded rows: row 0's).
 """
 
 from __future__ import annotations
@@ -38,6 +45,10 @@ class Moe:
         # the checkpoint's packed tensors, as every kernel reads them: weights, block scales (bytes), expert factors;
         # w13's rows alternate gate, up
         self.packed = (*self._pack(raw13), *self._pack(raw2))
+        from hibana.engine.config import current
+        cfg = current()
+        self.keep = cfg.moe_keep if cfg.moe_keep < c.EXPERTS_PER_TOKEN else 0  # 0: every row's top 8
+        self.budget, self.per_request = (cfg.moe_budget, cfg.moe_budget_per_request) if self.keep else (0, 0)
 
     @staticmethod
     def _read(w, names: list[str], device):
@@ -57,12 +68,25 @@ class Moe:
     def route(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         return prefill.route(x.contiguous(), self.router16, self.bias, c.EXPERTS_PER_TOKEN, c.ROUTE_SCALE)
 
-    def __call__(self, x: torch.Tensor) -> torch.Tensor:
-        """x [M, H] BF16 -> the routed experts' weighted sum, BF16."""
+    def share(self, x: torch.Tensor, slots: torch.Tensor, steps: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Budgeted routing of a decode or verification call: rows request-major, `steps` a request, request q real
+        iff slots[q] != 0 (a graph's padding sits on the dummy slot 0)."""
+        from hibana.model.nemotron.moe import route_budget
+        ids, weights, _ = route_budget(x.float() @ self.router16.float().T, self.bias, c.EXPERTS_PER_TOKEN, 0, self.keep,
+                                       self.budget, slots, steps, per_request=self.per_request, scale=c.ROUTE_SCALE,
+                                       id_dtype=torch.int64)
+        return ids, weights
+
+    def __call__(self, x: torch.Tensor, slots: torch.Tensor | None = None, steps: int = 1) -> torch.Tensor:
+        """x [M, H] BF16 -> the routed experts' weighted sum, BF16. `slots` and `steps` (decode and verification:
+        the requests' state slots, rows a request) let HIBANA_MOE_KEEP share experts."""
         nvfp4 = self.packed[0].dtype == torch.uint8
         if x.shape[0] <= kernels.MOE_ROWS and self.pair_calls:
             x = x.contiguous()
-            ids, weights = kernels.route(x, self.router16, self.bias, c.EXPERTS_PER_TOKEN, c.ROUTE_SCALE)
+            if self.keep and slots is not None:
+                ids, weights = self.share(x, slots, steps)
+            else:
+                ids, weights = kernels.route(x, self.router16, self.bias, c.EXPERTS_PER_TOKEN, c.ROUTE_SCALE)
             quantize = prefill.quantize_nvfp4 if nvfp4 else prefill.quantize_mxfp8
             act = prefill.pair_mm(quantize(x), ids, c.EXPERTS_PER_TOKEN, *self.packed[:3], swiglu=(c.GATE_SOFTCAP, c.UP_SOFTCAP))
             down = prefill.pair_mm(quantize(act), ids, 1, *self.packed[3:])

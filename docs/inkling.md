@@ -143,6 +143,26 @@ The drafter earns most on math and structured output (`fast`, greedy: 81 and 75 
 Cold real-text prompts of 2,000, 9,300 and 17,000 tokens prefill at 3,800-3,900 tokens/s in `exact` and about 4,000
 in `fast`.
 
+## Expert sharing
+
+`HIBANA_MOE_KEEP` / `HIBANA_MOE_BUDGET` ([operations](operations.md#serving-profiles)) apply to decode and verification
+calls with Nemotron's selection (`route_budget`): every row keeps its top F experts, its other top-8 experts ride
+along when the call's set holds them, and the set grows past the rows' floors by summed routing weight up to the cap.
+No profile sets them. Closed-loop streams over the 18 h2h prompts (thinking off, greedy, `HIBANA_MAX_BATCH=16`),
+all streams' tokens/s, off against keep 4 with a cap of 20:
+
+| | 1 | 2 | 4 | 8 | 16 streams |
+|---|---|---|---|---|---|
+| BF16 trunk, no drafter | 38.1 -> 37.7 | 58.9 -> 58.6 | 81.4 -> 97.0 | 114.4 -> 152.2 | 160.2 -> 211.3 |
+| `exact` (verify 3 at 1-4 requests) | 45.4 -> 44.7 | 68.4 -> 81.5 | 95.6 -> 117.8 | 111.6 -> 153.1 | 153.1 -> 199.2 |
+
+On the replies' teacher-forced routes, keep 4 with a cap of 20 reads 19.7 experts a visit instead of 26.3 at four
+streams (88% of the routing weight kept), 25.4 instead of 44.2 at eight (77%) and 41.3 instead of 66.2 at sixteen
+(83%). One stream reads its own 8 either way. GSM8K-200 four at a time (`exact`, to 1,024 tokens), paired against
+sharing off (95.0%): keep 4 with a cap of 20 93.0% (1 better / 5 worse, p 0.22); keep 4 with 6 a request up to 48,
+which also cuts a request alone to 6 experts a row (1 request: 45.4 -> 53.7 tokens/s), 94.5% (3 / 4). The lossy gate
+has not run on either.
+
 ## Memory
 
 Loaded weights take 18 GiB: the packed experts (12.4 GiB), which every path reads as stored, the trunk, embeddings

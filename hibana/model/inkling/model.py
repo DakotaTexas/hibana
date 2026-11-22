@@ -142,7 +142,7 @@ def decode_visit(layer: Layer, hidden: torch.Tensor, states: torch.Tensor, count
         kernels.rms(hidden, into=states, slot=count)
         count += 1
     x = kernels.mix(states, count, residual, layer.mlp_query, 1, layer.mlp_norm, gate, 3)[0]
-    return kernels.conv(layer.moe(x), layer.mlp_taps, offset=c.CONV_STREAMS["mlp"][0], residual=residual, **conv)
+    return kernels.conv(layer.moe(x, layout.rows, layout.steps), layer.mlp_taps, offset=c.CONV_STREAMS["mlp"][0], residual=residual, **conv)
 
 
 def conv_mix(x: torch.Tensor, taps: torch.Tensor, layout: Layout, visit: int, stream: str, add: torch.Tensor | None, states: torch.Tensor,
