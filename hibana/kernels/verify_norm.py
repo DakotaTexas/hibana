@@ -1,13 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Normalization arithmetic of the pinned SGLang compiled verification path.
+"""Verification-path RMS norms, with the arithmetic of the pinned SGLang compiled verification path.
 
-Residual variance uses the FP32 sum; the numerator is reloaded from its BF16
-store. Keep the two loops and reduction layout: replacing the reload with an
-in-register cast or fusing FP8 quantization changes midpoint rounding.
-The variance sum's order is tl.sum's, which moved with Triton 3.8: a few
-outputs per million differ from 3.7's by one BF16 step.
-The compiled GDN kernel promotes epsilon and subsequent normalization math
-to FP64. Prefill keeps the native CUDA / FP32 implementations.
+The add norm's variance uses the FP32 sum of the input and the residual; its numerator is that sum's BF16 store,
+reloaded. The gated (GDN) norm promotes epsilon and the normalization after the variance to FP64.
+tests/gpu/test_verify_norm.py holds each kernel to this math in float64, to FP32 rounding. Prefill keeps the native
+CUDA / FP32 implementations.
 """
 from __future__ import annotations
 

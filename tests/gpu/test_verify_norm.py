@@ -1,7 +1,23 @@
-"""Compiled target normalization precision, ownership and graph mutation."""
+"""The verification norms (`kernels/verify_norm.py`, and the native norm beside them) against their math in float64,
+to FP32 rounding; their ownership of the inputs; graph replay."""
 
 import pytest
 import torch
+
+U = 2.0 ** -24
+
+
+def assert_rounds_from(out, exact, n):
+    """`out` (BF16) is `exact` (float64) rounded, up to what FP32 arithmetic explains. Every element lies within half a
+    BF16 step plus the error of an n-term FP32 sum of squares in any order (gamma_n), halved by the square root, and a
+    few more roundings; and at most 1e-4 of them fall on the other side of a rounding midpoint. The kernels measure
+    about 1e-5 on Triton 3.7.1 and 3.8.0; a variance taken from the BF16 sum gives about 5e-3, a numerator that skips
+    the BF16 store 0.2."""
+    out, exact = out.double(), exact.double()
+    step = torch.pow(2.0, torch.floor(torch.log2(exact.abs().clamp_min(1e-30))) - 7)
+    rel = n * U / (1 - n * U) / 2 + 8 * U
+    assert ((out - exact).abs() <= step / 2 + rel * exact.abs()).all()
+    assert (out != exact.to(torch.bfloat16).double()).double().mean() <= 1e-4
 
 
 
@@ -25,13 +41,11 @@ def test_initial_verify_norm_graph_reads_new_embeddings(rows):
         torch.manual_seed(seed)
         x.normal_()
         original = x.clone()
-        xf = x.float()
-        expected = (xf * torch.rsqrt(xf.square().mean(-1, keepdim=True) + 1e-6)
-                    * (1 + weight.float())).bfloat16()
+        xd = x.double()
+        exact = xd * torch.rsqrt(xd.square().mean(-1, keepdim=True) + 1e-6) * (1 + weight.double())
         graph.replay()
         assert torch.equal(x, original) and torch.equal(retained, original)
-        assert (out == expected).float().mean() > .9999
-        torch.testing.assert_close(out.float(), expected.float(), rtol=.008, atol=1e-6)
+        assert_rounds_from(out, exact, 5120)
         assert torch.equal(packed.view(torch.uint8), quant_fp8(out, scale).view(torch.uint8))
 
 
@@ -50,9 +64,8 @@ def test_phase_specific_norm_uses_unrounded_variance(rows, verify, inplace):
     w = torch.randn(5120, device='cuda', dtype=torch.bfloat16) * .1
     scale = torch.tensor(.0237, device='cuda')
     summed = x.float() + residual.float()
-    numerator = summed.bfloat16().float() if verify else summed
-    expected = (numerator * torch.rsqrt(summed.square().mean(-1, keepdim=True) + 1e-6)
-                * (1 + w.float())).bfloat16()
+    numerator = summed.bfloat16().double() if verify else summed.double()  # verify: the sum's BF16 store
+    exact = numerator * torch.rsqrt(summed.double().square().mean(-1, keepdim=True) + 1e-6) * (1 + w.double())
     out, packed, retained = GemmaRMSNorm(w, 1e-6).fused_add_quant(
         x, residual, scale, inplace=inplace, verify=verify)
     assert torch.equal(retained, summed.bfloat16())
@@ -60,10 +73,7 @@ def test_phase_specific_norm_uses_unrounded_variance(rows, verify, inplace):
     assert torch.equal(x, x_original)
     if not inplace:
         assert torch.equal(residual, original)
-    # Independent torch reduction can differ at BF16 midpoints; using the wrong
-    # numerator or rounded variance changes thousands of elements here.
-    assert (out == expected).float().mean() > .9999
-    torch.testing.assert_close(out.float(), expected.float(), rtol=.008, atol=1e-6)
+    assert_rounds_from(out, exact, 5120)
     assert torch.equal(packed.view(torch.uint8), quant_fp8(out, scale).view(torch.uint8))
 
 
@@ -98,12 +108,9 @@ def test_compiled_gdn_norm_scalar_precision_and_graph(tokens):
     x = torch.randn(tokens, 48, 128, device='cuda', dtype=torch.bfloat16)
     z = torch.randn_like(x)
     weight = torch.randn(128, device='cuda', dtype=torch.bfloat16)
-    def reference():
-        xf, zf = x.float(), z.float()
-        variance = xf.square().mean(-1, keepdim=True)
-        rstd = torch.rsqrt(variance.double() + 1e-6)
-        gate = zf * torch.sigmoid(zf)
-        return (xf * rstd * weight.float() * gate).bfloat16()
+    def exact():
+        xd, zd = x.double(), z.double()
+        return xd * torch.rsqrt(xd.square().mean(-1, keepdim=True) + 1e-6) * weight.double() * zd * torch.sigmoid(zd)
     for _ in range(2):
         verify_gated_norm(x, z, weight, 1e-6)
     graph = torch.cuda.CUDAGraph()
@@ -111,7 +118,6 @@ def test_compiled_gdn_norm_scalar_precision_and_graph(tokens):
         out = verify_gated_norm(x, z, weight, 1e-6)
     for seed in [15, 16]:
         torch.manual_seed(seed); x.normal_(); z.normal_()
-        expected = reference()
+        want = exact()
         graph.replay()
-        assert (out == expected).float().mean() > .9999
-        torch.testing.assert_close(out.float(), expected.float(), rtol=.008, atol=1e-6)
+        assert_rounds_from(out, want, 128)
