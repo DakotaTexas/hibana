@@ -20,6 +20,8 @@ class DSparkProposer:
         """`draft`: the model's `InklingDraft`, its pages registered with the KV pool; `slots`: the state pool's."""
         if k != draft.block - 1:
             raise ValueError(f"DSpark drafts its whole block: {draft.block - 1} tokens (verify fewer with HIBANA_SPEC_DEPTHS)")
+        if draft.cos.shape[0] < context.max_context + draft.block:
+            raise ValueError(f"the DSpark drafter covers {draft.cos.shape[0] - draft.block} positions, the engine serves {context.max_context}")
         self.draft, self.context, self.k = draft, context, k
         # the recurrent head's context of each request, by its state slot
         self.head_context = torch.zeros((slots, draft.hidden), dtype=torch.bfloat16, device=context.device)

@@ -333,6 +333,27 @@ def test_ssd_resume_matches_a_resume_from_memory(tmp_path):
         engine_config.install(before)
 
 
+def test_dspark_covers_the_served_context():
+    """The drafter is built for the context the engine serves (HIBANA_MAX_CONTEXT), and an executor that serves more
+    than it covers is refused at startup: a request past the drafter's positions stopped the engine."""
+    from hibana.engine import config as engine_config
+    from hibana.engine.executor import Executor
+    before = engine_config.current()
+    engine_config.install(before.replace(spec="7", spec_depths="1:3", max_context=40960))
+    try:
+        model = load()
+        assert model.draft.cos.shape[0] >= 40960 + model.draft.block
+        ex = Executor(model, num_pages=4096, num_slots=4, max_batch=1, max_context=40960, log=None)
+        ex.enable_spec(7, proposer="dspark", state_strategy="snapshots")
+        del ex
+        gc.collect()
+        with pytest.raises(ValueError, match="DSpark drafter covers"):
+            Executor(model, num_pages=4096, num_slots=4, max_batch=1, max_context=81920, log=None).enable_spec(
+                7, proposer="dspark", state_strategy="snapshots")
+    finally:
+        engine_config.install(before)
+
+
 def chat_ids(text: str) -> list[int]:
     from hibana.tokenizer import SnapshotTokenizer
     tok = SnapshotTokenizer(checkpoint())

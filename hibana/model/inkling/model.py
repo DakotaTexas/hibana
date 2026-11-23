@@ -240,7 +240,9 @@ class Inkling:
         self.draft = None
         if current().spec not in (None, "", "0"):
             from hibana.model.inkling.dspark import InklingDraft
-            self.draft = InklingDraft(snap, self, target.context_length)
+            # as long as the engine serves (HIBANA_MAX_CONTEXT), not the target's default: its rotary table and page
+            # lists end there
+            self.draft = InklingDraft(snap, self, current().max_context or target.context_length)
         self.state_slots = 0  # the state pool's slots, once registered
         if log:
             allocated = torch.cuda.memory_allocated() / 2**30 if self.device.type == "cuda" else 0.0
