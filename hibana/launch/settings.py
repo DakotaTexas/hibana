@@ -115,10 +115,10 @@ def profile_defaults(profile: str, target: str, flashnext_experts: str = "w3", t
         # (HIBANA_SPEC_STEP_COST) was within noise of it. Past four requests plain decode wins. Served tok/s over the
         # 18 h2h prompts (thinking off, to 1,024 tokens), one request greedy / T 0.7 (median), then 2 / 4 closed-loop
         # streams in all: BF16 trunk with the drafter 56.6 / 51.7, 72.7 / 99.9, without 39.6 / 38.9, 61.0 / 85.7; FP8
-        # trunk with the drafter 68.5 / 65.7, 84.5 / 109.9. The SSD tier is unmeasured with the visits' convolution
-        # windows.
+        # trunk with the drafter 68.5 / 65.7, 84.5 / 109.9. The SSD tier stores each visit's K/V and convolution
+        # windows and DSpark's context rows with a prefix; a resume from it matches one from memory bit for bit.
         p = {"HIBANA_SPEC": "7", "HIBANA_SPEC_DEPTHS": "1:3,2:3,4:3,8:0,16:0", "HIBANA_W3_DECODE": "0", "HIBANA_ACCEPT_DEFAULT": "off",
-             "HIBANA_ACCEPT_SOFT": "0", "HIBANA_DEVICE_ACCEPT": "0", "HIBANA_MAX_BATCH": "4", "HIBANA_SSD": "0",
+             "HIBANA_ACCEPT_SOFT": "0", "HIBANA_DEVICE_ACCEPT": "0", "HIBANA_MAX_BATCH": "4", "HIBANA_SSD": "1",
              "HIBANA_INKLING_TRUNK": "bf16"}
         if profile == "exact":
             return p

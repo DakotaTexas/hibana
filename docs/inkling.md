@@ -12,7 +12,8 @@ hibana chat inkling
 It serves text only (the checkpoint's vision tower is not loaded) and drafts with the checkpoint's bundled DSpark
 drafter, verifying drafts exactly in every profile. `exact` serves the checkpoint's own weights; `fast` (the
 default) and `throughput` quantize the attention projections and the vocabulary head to FP8 at load and share
-experts within a budget ([expert sharing](#expert-sharing)), and `throughput` decodes up to 16 requests together. The SSD tier is off for this target.
+experts within a budget ([expert sharing](#expert-sharing)), and `throughput` decodes up to 16 requests together.
+Every profile keeps the SSD tier on, as the other targets do.
 
 ## The model
 
@@ -54,6 +55,8 @@ visit to its layer and pass): a visit is what holds per-request state.
   the whole prompt too, though they read the last 1,024 tokens: a cached prefix then resumes at any position.
 - **Convolution windows.** A visit's four streams keep their last three inputs: 1.83 MiB a slot
   (`StatePool` aux `inkling_conv`, `Target.slot_state_bytes`), snapshotted like a recurrent state.
+- **The SSD tier** stores a prefix's K/V with its pages' other rows (DSpark's context) and its snapshot's convolution
+  windows, as it stores a recurrent state; a resume from the SSD matches one from memory bit for bit.
 
 ## Arithmetic
 

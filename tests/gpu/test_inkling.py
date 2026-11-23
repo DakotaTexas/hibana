@@ -262,6 +262,77 @@ def test_dspark_rounds_emit_what_a_prefill_predicts():
         engine_config.install(before)
 
 
+def test_ssd_resume_matches_a_resume_from_memory(tmp_path):
+    """On the pinned checkpoint with its drafter: a prefix the SSD tier stored and restored gives back what memory held
+    (each visit's K/V, its convolution windows, DSpark's context rows) and resumes at the same point to the same
+    tokens, bit for bit, as a resume from the GPU prefix cache."""
+    from hibana.engine import config as engine_config
+    from hibana.engine.executor import Executor
+    from hibana.engine.sampler import SamplingParams
+    before = engine_config.current()
+    engine_config.install(before.replace(spec="7", spec_depths="1:3", ssd=True, ssd_dir=str(tmp_path), ssd_gib=2.0, ssd_block_tokens=64))
+    try:
+        model = load()
+        ex = Executor(model, num_pages=8192, num_slots=8, max_batch=1, log=None)
+        ex.enable_spec(7, proposer="dspark", state_strategy="snapshots")
+        ex.capture_graphs(log=None)
+        ex.enable_ssd_tier()
+        tier = ex.cache.ssd
+        assert tier is not None
+        tier.min_tokens = tier.min_hit = 1
+        # a follow-up: the prefix up to the last message's start is what a later request resumes from (the server's
+        # `message_boundary`), long enough for a few 64-token blocks and a tail
+        from hibana.tokenizer import SnapshotTokenizer
+        tok = SnapshotTokenizer(checkpoint())
+        head = ("<|message_system|><|content_text|>Thinking effort level: 0\nYou answer questions about lighthouses. A "
+                "lighthouse lens is a Fresnel lens: concentric rings of glass prisms that bend the light of one lamp into a "
+                "narrow horizontal beam, so the light reaches the horizon instead of the sky or the sea at the foot of the "
+                "tower. The largest lenses stand taller than a person and weigh several tonnes. They turn on a bed of "
+                "mercury or on rollers, driven by a clockwork weight that a keeper wound every few hours; the turning "
+                "lens sweeps the beam around, and each station's pattern of flashes tells ships which light they see. "
+                "Keepers trimmed the wicks, polished the brass and glass, and logged the weather through the night."
+                "<|end_message|>")
+        boundary = len(tok.encode(head))
+        ids = tok.encode(head + "<|message_user|><|content_text|>Why does the lens turn, and what kept it turning?<|end_message|>")
+        assert 64 < boundary < len(ids)
+
+        def run():
+            req = ex.admit(ids, SamplingParams(max_new_tokens=24, temperature=0.0, ignore_eos=True, message_boundary=boundary))
+            ex.prefill(req)
+            while not req.finished:
+                ex.decode_step([req])
+            ex.release(req)
+            return req.prefix_len, list(req.output_ids)
+
+        def held(n):
+            m = ex.cache.match(ids[:n], touch=False)
+            assert m.length == n
+            rows, kvp = m.pages[:n].long(), ex.kv_pool
+            tensors = {f"pool.{k}": t[m.snapshot.slot].clone() for k, t in ex.state_pool.aux.items()}
+            tensors.update({f"paux.{k}": t.index_select(0, rows).clone() for k, t in kvp.page_aux.items()})
+            tensors.update({f"kv.{lid}.{s}": pool.index_select(0, rows).clone() for lid in kvp.layer_ids
+                            for s, pool in (("k", kvp.k[lid]), ("v", kvp.v[lid]))})
+            return tensors
+
+        run()
+        memory = run()
+        assert 64 <= memory[0] <= boundary, memory[0]
+        stored = held(memory[0])
+        assert any(k.startswith("pool.") for k in stored) and any(k.startswith("paux.dspark") for k in stored)
+        tier.drain(ex.cache)
+        ex.cache.evict(need_pages=ex.kv_pool.num_pages)
+        assert ex.cache.match(ids, touch=False).length == 0
+        assert ex.cache.restore(ids) == memory[0]
+        restored = held(memory[0])
+        assert [k for k in stored if not torch.equal(stored[k], restored[k])] == []
+        assert run() == memory
+        ex.state.check()
+        tier.drain(ex.cache)
+        ex.flush_cache()
+    finally:
+        engine_config.install(before)
+
+
 def chat_ids(text: str) -> list[int]:
     from hibana.tokenizer import SnapshotTokenizer
     tok = SnapshotTokenizer(checkpoint())
