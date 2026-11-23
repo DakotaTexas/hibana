@@ -20,7 +20,11 @@ against itself at another chunk, the rounding noise floor (floor.json). A candid
 scores the baseline's sequences at `--chunk` (dist.json): per position the argmax agreement with
 the baseline, the truncated KL(baseline || arm) over the baseline's top 32, and the arm's NLL of
 the sequence's token. At 64 rows every forward takes the decode path (3-bit copies serve calls
-of at most 64 rows), which is where the lossy weight options act.
+of at most 64 rows), which is where the lossy weight options act. `--chunk 1` scores through the
+plain decode step instead, the sequence's tokens forced in place of the sampled ones: Inkling runs
+its decode kernels only there (prefill rows take its prefill kernels).
+
+Prompts are framed by the target's chat template, as the server frames them (thinking off).
 """
 from __future__ import annotations
 
@@ -37,8 +41,8 @@ TOPK = 32
 CONFIDENT = math.log(0.8)
 
 
-def chat_ids(tok, prompt: str) -> list[int]:
-    return tok.encode(f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n")
+def chat_ids(template, tok, prompt: str) -> list[int]:
+    return tok.encode(template.render([{"role": "user", "content": prompt}], enable_thinking=False))
 
 
 def source_hash() -> str:
@@ -54,6 +58,7 @@ def source_hash() -> str:
 
 def load(args):
     from hibana import target as targets
+    from hibana.api.chat_template import ChatTemplate
     from hibana.cache.spec_budget import SpecConfig
     from hibana.engine import config
     from hibana.engine.executor import Executor
@@ -74,7 +79,7 @@ def load(args):
             "torch": torch.__version__, "device": torch.cuda.get_device_name(), "load_s": round(time.perf_counter() - started, 1),
             "spec": {"proposer": args.proposer, "depth": args.spec, "verify_state": args.verify_state,
                      "draft_precision": args.draft_precision, "draft": args.draft}}
-    return model, ex, SnapshotTokenizer(snap), info
+    return model, ex, SnapshotTokenizer(snap), ChatTemplate(snap, served.template_defaults, served.chat_format), info
 
 
 # ---------------------------------------------------------------- layer 2
@@ -101,10 +106,14 @@ def spec_pass(ex, prompts: list[dict], accept: tuple[int, float], tokens: int) -
 
 # ---------------------------------------------------------------- layer 1
 
-def logprob_chunks(ex, model, ids: list[int], chunk: int):
-    """(first row, log-probabilities [rows, V] fp32) of each prefill chunk of a cold prompt; row t predicts ids[t + 1]."""
+def logprob_chunks(ex, model, ids: list[int], chunk: int, start: int):
+    """(first row, log-probabilities [rows, V] fp32) of each prefill chunk of a cold prompt; row t predicts ids[t + 1].
+    Chunk 1: the prompt `ids[:start]` prefilled, then one plain decode step a row with `ids[start:]` forced."""
     from hibana.engine.sampler import SamplingParams
 
+    if chunk == 1:
+        yield from logprob_steps(ex, ids, start)
+        return
     ex.flush_cache()
     req = ex.admit(list(ids), SamplingParams(max_new_tokens=1, trace=False))
     try:
@@ -123,11 +132,47 @@ def logprob_chunks(ex, model, ids: list[int], chunk: int):
         ex.release(req)
 
 
+def logprob_steps(ex, ids: list[int], start: int):
+    """(row, log-probabilities [1, V] fp32) for rows start-1 .. len-2: the prefill's last row, then each plain decode
+    step's, the sampler returning the sequence's next token instead of its own (speculation off: one row a step)."""
+    from hibana.engine.sampler import SamplingParams
+
+    ex.flush_cache()
+    forced, rows = iter(ids[start:]), []
+
+    def force(logits, params, generators, masks=None):
+        rows.append(torch.log_softmax(logits.float(), dim=-1))
+        return torch.tensor([next(forced)], dtype=torch.int64, device=logits.device)
+
+    sample, ex.sampler.sample = ex.sampler.sample, force
+    choose = ex.spec.depth_policy.choose if ex.spec is not None else None
+    if ex.spec is not None:
+        ex.spec.depth_policy.choose = lambda reqs: 0
+    req = ex.admit(list(ids[:start]), SamplingParams(max_new_tokens=len(ids) - start, ignore_eos=True, trace=False))
+    try:
+        if req.prefill_pos != 0:
+            raise RuntimeError(f"expected a cold prefill, {req.prefill_pos} tokens were cached")
+        while req.prefill_pos < req.prefill_len:
+            ex.prefill(req)
+        while not req.finished:
+            ex.decode_step([req])
+    finally:
+        ex.sampler.sample = sample
+        if choose is not None:
+            ex.spec.depth_policy.choose = choose
+        req.cacheable = False
+        ex.release(req)
+    if list(req.output_ids) != list(ids[start:]):
+        raise RuntimeError("the forced continuation was not the one decoded")
+    for i, logp in enumerate(rows):
+        yield start - 1 + i, logp
+
+
 def base_rows(ex, model, seq: dict, chunk: int) -> dict:
     """Top-k log-probabilities of every continuation position (rows start-1 .. len-2)."""
     ids, lo = seq["ids"], seq["start"] - 1
     lps, ixs = [], []
-    for row, logp in logprob_chunks(ex, model, ids, chunk):
+    for row, logp in logprob_chunks(ex, model, ids, chunk, seq["start"]):
         a, b = max(lo, row), min(row + logp.shape[0], len(ids) - 1)
         if a < b:
             top = logp[a - row:b - row].topk(TOPK, dim=-1)
@@ -142,7 +187,7 @@ def score_rows(ex, model, seq: dict, base: dict, chunk: int) -> dict:
     b_lp, b_ix = base["lp"].cuda().float(), base["ix"].cuda().long()
     nxt = torch.tensor(ids[1:], device="cuda")
     agree, kl, nll = [], [], []
-    for row, logp in logprob_chunks(ex, model, ids, chunk):
+    for row, logp in logprob_chunks(ex, model, ids, chunk, seq["start"]):
         a, b = max(lo, row), min(row + logp.shape[0], len(ids) - 1)
         if a >= b:
             continue
@@ -202,11 +247,11 @@ def main(argv=None) -> int:
     tokens = args.tokens or workload["output_tokens"]
     args.out.mkdir(parents=True, exist_ok=True)
     baseline = args.base is None
-    model, ex, tok, info = load(args)
+    model, ex, tok, template, info = load(args)
     info.update(prompts_sha256=hashlib.sha256(args.prompts.read_bytes()).hexdigest(), workload=workload["version"],
                 accept=list(accept), tokens=tokens, chunk=args.chunk, floor_chunk=args.floor_chunk, baseline=baseline)
     (args.out / "arm.json").write_text(json.dumps(info, indent=1) + "\n")
-    prompts = [{**p, "ids": chat_ids(tok, p["prompt"])} for p in workload["prompts"]]
+    prompts = [{**p, "ids": chat_ids(template, tok, p["prompt"])} for p in workload["prompts"]]
 
     spec_file = args.out / "spec.json"
     if ("2" in layers or baseline) and not spec_file.exists():

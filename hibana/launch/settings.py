@@ -123,8 +123,8 @@ def profile_defaults(profile: str, target: str, flashnext_experts: str = "w3", t
         if profile == "exact":
             return p
         # fast, throughput: the attention projections and the vocabulary head in FP8 (the checkpoint's are BF16): a decode
-        # token streams 3.6 GB of weights instead of 5.4. GSM8K-200, four at a time: 95.5% against exact's 96.0%. The
-        # lossy-change gate has not run on it: its in-process layers frame prompts for the Qwen targets.
+        # token streams 3.6 GB of weights instead of 5.4. GSM8K-200, four at a time: 95.5% against exact's 96.0%.
+        # tools/lossy_gate.py --target inkling judges it, its first layer on the decode step.
         p["HIBANA_INKLING_TRUNK"] = "fp8"
         # and expert sharing in decode and verification (keep 4; lossy, Nemotron's selection): 6 experts a request up
         # to 48 a call, which also cuts a request alone to 6 a row. Same h2h measurement, against the FP8 trunk alone:

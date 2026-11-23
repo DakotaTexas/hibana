@@ -101,7 +101,9 @@ which `fast` and `throughput` set, quantizes them at load (`TrunkLinear`, one sc
 streams 3.6 GB of weights instead of 5.4. Calls of up to four rows multiply the E4M3 matrices with the BF16
 activations in `gemv` (a visit's query, key and value in one launch); wider calls quantize the activations per call.
 On GSM8K (200 items, four at a time) `fast` scores 95.5% and `exact` 96.0%; quantizing the activations of every call
-instead scored 94.0% (paired against BF16 activations: 3 items better, 6 worse, not significant). The lossy-change gate has not run on it.
+instead scored 94.0% (paired against BF16 activations: 3 items better, 6 worse, not significant). The lossy-change
+gate judges it (`tools/lossy_gate.py --target inkling`, its first layer scored on the decode step, where the FP8 trunk
+and expert sharing act).
 
 The experts read their inputs quantized as the checkpoint requires of them (`hf_quant_config.json`): an NVFP4
 expert's input and activation as NVFP4 with a scale per token (of the two E4M3 block scales that put a block's
