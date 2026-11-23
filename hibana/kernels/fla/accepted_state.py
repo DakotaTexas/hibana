@@ -11,6 +11,8 @@ import torch
 import triton
 import triton.language as tl
 
+from hibana.kernels.fla.fused_sigmoid_gating_recurrent import _col_dot
+
 
 @triton.jit
 def _reconstruct(h0, raw_k, raw_v, gates, betas, slots, counts, out,
@@ -36,7 +38,7 @@ def _reconstruct(h0, raw_k, raw_v, gates, betas, slots, counts, out,
         beta = tl.load(betas + ((layer * B + row) * HV + hv) * S + t)
         k = k / tl.sqrt(tl.sum(k * k) + 1e-6)
         state *= tl.exp(g)
-        v -= tl.sum(state * k[:, None], 0)
+        v -= _col_dot(state, k, BK, BV)
         v *= beta
         state += k[:, None] * v[None, :]
     if INPLACE:

@@ -91,7 +91,7 @@ constraints = [
     { name = "torch", specifier = "==2.13.0+cu130", index = "https://download.pytorch.org/whl/cu130" },
     { name = "tqdm", specifier = "==4.70.0" },
     { name = "transformers", specifier = "==5.15.1" },
-    { name = "triton", specifier = "==3.7.1" },
+    { name = "triton", specifier = "==3.8.0" },
     { name = "typer", specifier = "==0.27.2" },
     { name = "typing-extensions", specifier = "==4.16.0" },
     { name = "typing-inspection", specifier = "==0.4.4" },
@@ -99,7 +99,10 @@ constraints = [
     { name = "uvicorn", specifier = "==0.52.4" },
     { name = "xgrammar", specifier = "==0.2.8" },
 ]
-overrides = [{ name = "nvidia-cublas", specifier = "==13.6.1.10" }]
+overrides = [
+    { name = "nvidia-cublas", specifier = "==13.6.1.10" },
+    { name = "triton", specifier = "==3.8.0" },
+]
 
 [[package]]
 name = "absl-py"
@@ -516,7 +519,7 @@ gb10 = [
     { name = "ninja", specifier = "==1.13.2" },
     { name = "pytest", specifier = "==9.1.1" },
     { name = "torch", specifier = "==2.13.0+cu130", index = "https://download.pytorch.org/whl/cu130" },
-    { name = "triton", specifier = "==3.7.1" },
+    { name = "triton", specifier = "==3.8.0" },
 ]
 
 [[package]]
@@ -1319,10 +1322,10 @@ wheels = [
 
 [[package]]
 name = "triton"
-version = "3.7.1"
+version = "3.8.0"
 source = { registry = "https://pypi.org/simple" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/94/fa/f856e24deb462d5f18bd4b5a746957862ab9b6ee5834bda60605ec348366/triton-3.7.1-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:9497f2e696ee368862a181a90b2dcc03ca978cc4f602abd67c7d81022a6988e1", size = 184692359, upload-time = "2026-06-17T20:03:48.288Z" },
+    { url = "https://files.pythonhosted.org/packages/87/07/0f8cd8e8db0472334253efdaaab3d0819fea27aa99bf0e7f1aeea4ceb5ae/triton-3.8.0-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:a9c404c69ed4a39e8ec632eaf6b9fe058a060bf98979c177f6ef666f06bb8d50", size = 226474486, upload-time = "2026-08-28T16:08:18.29Z" },
 ]
 
 [[package]]
@@ -1401,6 +1404,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "torch" },
     { name = "transformers" },
+    { name = "triton" },
     { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/03/0f/29f521535729be740779c2c98b630ef6607cf28be9b669895dd2b821ff63/xgrammar-0.2.8.tar.gz", hash = "sha256:8305646fd2b319d6c3003f51a1665e54cbbe9cba1fb636bc41d0b46434ccbb80", size = 2689558, upload-time = "2026-09-24T18:35:21.261Z" }

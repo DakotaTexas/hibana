@@ -1,7 +1,8 @@
 # The tested GB10 versions; pyproject.toml's [tool.uv] constraint-dependencies repeat them for uv.lock (keep in step).
+# Triton is also in its override-dependencies, because torch pins another version of it.
 -c common.txt
 torch==2.13.0+cu130
-triton==3.7.1
+triton==3.8.0
 flashinfer-python==0.6.17
 flashinfer-jit-cache==0.6.17+cu130
 apache-tvm-ffi==0.1.13.post3

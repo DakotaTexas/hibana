@@ -7,6 +7,31 @@ import triton.language as tl
 from hibana.kernels._compat import is_arch_support_pdl
 
 
+@triton.jit
+def _col_dot(h, k, BK: tl.constexpr, BV: tl.constexpr):
+    """tl.sum(h * k[:, None], 0) for h [BK, BV]: each run of 4 rows (a thread's share at one warp) multiplied and added in
+    row order, then the runs summed by tl.sum. Triton 3.8 lowers tl.sum's in-thread adds to packed pairs, which cannot
+    fuse with the products; this keeps 3.7's FMAs and order. A tile of 1 or 2 rows has no run: tl.sum."""
+    if BK % 4 == 0:
+        shape: tl.constexpr = (BK // 4, 2, 2, BV)  # row 4g + 2a + b
+        hh = tl.permute(tl.reshape(h, shape), (0, 3, 1, 2))  # [BK // 4, BV, a, b]
+        kk = tl.permute(tl.reshape(tl.broadcast_to(k[:, None], (BK, BV)), shape), (0, 3, 1, 2))
+        h0, h1 = tl.split(hh)  # b = 0, 1
+        k0, k1 = tl.split(kk)
+        h00, h20 = tl.split(h0)  # rows +0, +2
+        h01, h21 = tl.split(h1)  # rows +1, +3
+        k00, k20 = tl.split(k0)
+        k01, k21 = tl.split(k1)
+        p = h00 * k00
+        p += h01 * k01
+        p += h20 * k20
+        p += h21 * k21
+        out = tl.sum(p, 0)
+    else:
+        out = tl.sum(h * k[:, None], 0)
+    return out
+
+
 @triton.jit(do_not_specialize=["T"])
 def fused_sigmoid_gating_delta_rule_update_kernel(
     A_log,
@@ -216,7 +241,7 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
         b_h *= tl.exp(b_g)
 
         # Delta rule: v -= sum(h * k, dim=0)
-        b_v -= tl.sum(b_h * b_k[:, None], 0)
+        b_v -= _col_dot(b_h, b_k, BK, BV)
 
         # Apply beta gating: v *= beta
         b_v *= b_beta
@@ -225,7 +250,7 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
         b_h += b_k[:, None] * b_v[None, :]
 
         # Compute output: o = sum(h * q, dim=0)
-        b_o = tl.sum(b_h * b_q[:, None], 0)
+        b_o = _col_dot(b_h, b_q, BK, BV)
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
 
         # Cache intermediate states if enabled

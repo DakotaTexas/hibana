@@ -14,6 +14,8 @@ import torch
 import triton
 import triton.language as tl
 
+from hibana.kernels.qsa.selection import _eighths
+
 
 @triton.jit
 def _sigmoid(x):
@@ -692,6 +694,51 @@ def expert_gemv(w: torch.Tensor, scale: torch.Tensor, x: torch.Tensor, idx: torc
 
 # ---- FP8 GEMV for a few rows and any K (the CUDA GEMV needs K % 512 == 0 and K <= 8192): y = alpha * (W @ x) ----
 @triton.jit
+def _row_dot(w, x, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr):
+    """tl.sum(w * x[None, :], 1) for w [BLOCK_N, BLOCK_K] and x [BLOCK_K], FP16 holding FP8 values: each run of 16
+    columns (a thread's share at 4 warps) multiplied and added in column order, then the runs summed by tl.sum. Triton
+    3.8 lowers tl.sum's in-thread adds to packed pairs, which cannot fuse with the products (about 1.5x the time at a few
+    rows); this keeps 3.7's mixed-precision FMAs (each product's operands widened beside it) and its order and bits."""
+    tl.static_assert(BLOCK_K % 16 == 0)
+    shape: tl.constexpr = (BLOCK_N, BLOCK_K // 16, 2, 2, 2, 2)  # each run of 16 as 8 pairs: [column c, column c + 8]
+    w0, w1, w2, w3, w4, w5, w6, w7 = _eighths(tl.reshape(w, shape))
+    x0, x1, x2, x3, x4, x5, x6, x7 = _eighths(tl.reshape(tl.broadcast_to(x[None, :], (BLOCK_N, BLOCK_K)), shape))
+    wa0, wb0 = tl.split(w0)
+    wa1, wb1 = tl.split(w1)
+    wa2, wb2 = tl.split(w2)
+    wa3, wb3 = tl.split(w3)
+    wa4, wb4 = tl.split(w4)
+    wa5, wb5 = tl.split(w5)
+    wa6, wb6 = tl.split(w6)
+    wa7, wb7 = tl.split(w7)
+    xa0, xb0 = tl.split(x0)
+    xa1, xb1 = tl.split(x1)
+    xa2, xb2 = tl.split(x2)
+    xa3, xb3 = tl.split(x3)
+    xa4, xb4 = tl.split(x4)
+    xa5, xb5 = tl.split(x5)
+    xa6, xb6 = tl.split(x6)
+    xa7, xb7 = tl.split(x7)
+    p = wa0.to(tl.float32) * xa0.to(tl.float32)
+    p += wa1.to(tl.float32) * xa1.to(tl.float32)
+    p += wa2.to(tl.float32) * xa2.to(tl.float32)
+    p += wa3.to(tl.float32) * xa3.to(tl.float32)
+    p += wa4.to(tl.float32) * xa4.to(tl.float32)
+    p += wa5.to(tl.float32) * xa5.to(tl.float32)
+    p += wa6.to(tl.float32) * xa6.to(tl.float32)
+    p += wa7.to(tl.float32) * xa7.to(tl.float32)
+    p += wb0.to(tl.float32) * xb0.to(tl.float32)
+    p += wb1.to(tl.float32) * xb1.to(tl.float32)
+    p += wb2.to(tl.float32) * xb2.to(tl.float32)
+    p += wb3.to(tl.float32) * xb3.to(tl.float32)
+    p += wb4.to(tl.float32) * xb4.to(tl.float32)
+    p += wb5.to(tl.float32) * xb5.to(tl.float32)
+    p += wb6.to(tl.float32) * xb6.to(tl.float32)
+    p += wb7.to(tl.float32) * xb7.to(tl.float32)
+    return tl.sum(p, 1)
+
+
+@triton.jit
 def _fp8_gemv_kernel(X, W, Alpha, Y, stride_x, stride_w, stride_y, N: tl.constexpr, K: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr):
     r = tl.program_id(0)
     rows = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
@@ -700,9 +747,9 @@ def _fp8_gemv_kernel(X, W, Alpha, Y, stride_x, stride_w, stride_y, N: tl.constex
     for k0 in tl.static_range(0, K, BLOCK_K):
         cols = k0 + tl.arange(0, BLOCK_K)
         cmask = cols < K
-        w = tl.load(W + rows[:, None] * stride_w + cols[None, :], mask=rmask[:, None] & cmask[None, :], other=0.0).to(tl.float32)
-        x = tl.load(X + r * stride_x + cols, mask=cmask, other=0.0).to(tl.float32)
-        acc += tl.sum(w * x[None, :], 1)
+        w = tl.load(W + rows[:, None] * stride_w + cols[None, :], mask=rmask[:, None] & cmask[None, :], other=0.0).to(tl.float16)
+        x = tl.load(X + r * stride_x + cols, mask=cmask, other=0.0).to(tl.float16)
+        acc += _row_dot(w, x, BLOCK_N, BLOCK_K)
     tl.store(Y + r * stride_y + rows, (acc * tl.load(Alpha).to(tl.float32)).to(tl.bfloat16), mask=rmask)
 
 
@@ -772,10 +819,10 @@ def _fp8_gemv_quant_kernel(X, W, WScale, Y, ScaleOut, Parts, M, NPARTS, stride_x
     for k0 in tl.static_range(0, K, BLOCK_K):
         cols = k0 + tl.arange(0, BLOCK_K)
         cmask = cols < K
-        w = tl.load(W + rows[:, None] * stride_w + cols[None, :], mask=rmask[:, None] & cmask[None, :], other=0.0).to(tl.float32)
+        w = tl.load(W + rows[:, None] * stride_w + cols[None, :], mask=rmask[:, None] & cmask[None, :], other=0.0).to(tl.float16)
         xa = _act_load(X, r * stride_x, cols, cmask, K, ACT)
-        x = tl.minimum(tl.maximum(tl.div_rn(xa, scale), -448.0), 448.0).to(tl.float8e4nv).to(tl.float32)
-        acc += tl.sum(w * x[None, :], 1)
+        x = tl.minimum(tl.maximum(tl.div_rn(xa, scale), -448.0), 448.0).to(tl.float8e4nv).to(tl.float16)
+        acc += _row_dot(w, x, BLOCK_N, BLOCK_K)
     tl.store(Y + r * stride_y + rows, (acc * alpha).to(tl.bfloat16), mask=rmask)
 
 

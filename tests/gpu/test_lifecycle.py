@@ -67,6 +67,13 @@ def runtime(request, qwen38):
     torch.cuda.empty_cache()
 
 
+def seed_half(ex, ids) -> None:
+    """Flush the cache and leave the snapshot of ids' first half in it: the route the tests' resumed requests take (a
+    cold prefill rounds the GDN layers differently and may decode other tokens)."""
+    ex.flush_cache()
+    ex.generate(ids[:len(ids) // 2], SamplingParams(max_new_tokens=1))
+
+
 @pytest.fixture
 def setup(runtime):
     ex, prompts = runtime
@@ -79,8 +86,7 @@ def setup(runtime):
         spec.verify_graphs, spec.proposer.graphs = (vg, dg) if graphs else (None, None)
         ex.cache = RadixCache(ex.kv_pool, ex.state_pool, ex.device) if cache != 'off' else None
         if cache == 'hit':
-            ids = prompts['canary_json']
-            ex.generate(ids[:len(ids) // 2], SamplingParams(max_new_tokens=1))
+            seed_half(ex, prompts['canary_json'])
         spec.reset_stats()
         ex.ledger.check_floor()
         return ex, prompts
@@ -197,8 +203,9 @@ def test_flush_with_active_shared_prefix_and_continuation(setup, graphs, batch):
         ex.release(r)
         assert ex.cache.flushing == (i != len(reqs) - 1)
     assert pinned <= set(ex.kv_pool._free)
-    cold = ex.generate_batch([(ids, SamplingParams(max_new_tokens=8, ignore_eos=True)) for _ in reqs])
-    assert outputs == [r.output_ids for r in cold]
+    seed_half(ex, ids)  # the snapshot the requests above resumed from
+    resumed = ex.generate_batch([(ids, SamplingParams(max_new_tokens=8, ignore_eos=True)) for _ in reqs])
+    assert outputs == [r.output_ids for r in resumed]
 
 
 @pytest.mark.parametrize('graphs', [False, True])
@@ -228,7 +235,10 @@ def test_retract_after_streaming_preserves_history_and_continues(setup, graphs, 
     for r in reqs:
         ex.release(r)
     saved = ex.cache
-    ex.cache = None
+    if cache == 'hit':
+        seed_half(ex, ids)
+    else:
+        ex.cache = None
     baseline = ex.generate_batch([(ids, SamplingParams(max_new_tokens=8, ignore_eos=True)) for _ in reqs])
     ex.cache = saved
     assert outputs == [r.output_ids for r in baseline]
@@ -321,8 +331,8 @@ def test_ngram_real_target_cache_and_feature_lifetimes(runtime, graphs, features
     prop = ObservedNgram(ProposerContext(ex.device, ex.max_batch, ex.max_context), k=3, max_ngram=1)
     if features:
         prop.requirements = ProposerRequirements('observed-ngram', FeatureRequest(True, (0, 63)))
-    # The frozen structured canary has a stable continuation across cold and
-    # paged prefill. Its punctuation/keys also offer real suffix matches.
+    # The frozen structured canary's punctuation and keys offer real suffix matches. The cold and the resumed run are
+    # each held to a baseline that takes the same route.
     ids = prompts['canary_json']
     params = SamplingParams(max_new_tokens=16, ignore_eos=True)
     try:
@@ -331,16 +341,17 @@ def test_ngram_real_target_cache_and_feature_lifetimes(runtime, graphs, features
         ex.spec = None
         ex.use_graphs = graphs
         baseline = ex.generate(ids, params).output_ids
+        seed_half(ex, ids)
+        warm_baseline = ex.generate(ids, params).output_ids
         ex.flush_cache()
         ex.spec = SpecDecoder(ex, prop)
         if graphs:
             ex.spec.capture_graphs(log=print)
         # Both a fresh prefill and a hit must supply valid proposer inputs.
         cold = ex.generate(ids, params)
-        ex.flush_cache()
-        ex.generate(ids[:len(ids) // 2], SamplingParams(max_new_tokens=1))
+        seed_half(ex, ids)
         warm = ex.generate(ids, params)
-        assert cold.output_ids == warm.output_ids == baseline, (cold.output_ids, warm.output_ids, baseline)
+        assert cold.output_ids == baseline and warm.output_ids == warm_baseline, (cold.output_ids, baseline, warm.output_ids, warm_baseline)
         assert warm.prefix_len > 0 and ex.spec.rounds > 1
         assert observed
         if features:

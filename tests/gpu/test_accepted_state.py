@@ -13,6 +13,16 @@ import torch
 def test_reconstruct_every_accepted_prefix(batch, steps, graphs, impl):
     """The ring commit (`AcceptedState.run`) and the oracle replay against the verify recurrence's own states, bit for bit:
     the vendored Triton pair and the CUDA pair (`kernels/gdn_verify.py`, which the engine runs on FP32 pools)."""
+    reconstruct_every_accepted_prefix(batch, steps, graphs, impl, 128)
+
+
+@pytest.mark.parametrize('k', [1, 2])
+def test_reconstruct_at_narrow_key_widths(k):
+    """The vendored Triton pair at key widths below a 4-row run (their reductions keep tl.sum there)."""
+    reconstruct_every_accepted_prefix(2, 5, False, 'triton', k)
+
+
+def reconstruct_every_accepted_prefix(batch, steps, graphs, impl, k):
     from hibana.kernels import gdn_verify
     from hibana.kernels.fla.accepted_state import AcceptedState
     from hibana.kernels.fla import accepted_state
@@ -22,7 +32,7 @@ def test_reconstruct_every_accepted_prefix(batch, steps, graphs, impl):
     else:
         fused_sigmoid_gating_delta_rule_update, reconstruct = triton_verify, accepted_state.reconstruct
     torch.manual_seed(1907 + batch + steps)
-    layers, h, hv, k, v = 2, 16, 48, 128, 128
+    layers, h, hv, v = 2, 16, 48, 128
     state = torch.randn((layers, 7, hv, v, k), device='cuda') * .1
     initial = state.clone()
     pool = SimpleNamespace(ssm_all=state, layer_ids=list(range(layers)))

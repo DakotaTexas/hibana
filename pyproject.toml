@@ -46,7 +46,7 @@ gb10 = [
   "flashinfer-python==0.6.17",
   "flashinfer-jit-cache==0.6.17+cu130",
   "b12x==1.5.0",  # Bolt's projections and routed experts (model/bolt/linear.py, kernels/b12x_iq2_moe.py)
-  "triton==3.7.1",
+  "triton==3.8.0",
   "einops==0.8.2",
   "ninja==1.13.2",  # first-use builds of the CUDA kernels
   "pytest==9.1.1",
@@ -145,7 +145,7 @@ constraint-dependencies = [
   "torch==2.13.0+cu130",
   "tqdm==4.70.0",
   "transformers==5.15.1",
-  "triton==3.7.1",
+  "triton==3.8.0",
   "typer==0.27.2",
   "typing-inspection==0.4.4",
   "typing_extensions==4.16.0",
@@ -155,7 +155,9 @@ constraint-dependencies = [
 ]
 # torch 2.13+cu130 requires cuda-toolkit 13.0.3, which pins nvidia-cublas 13.1.1.3; its FP8 nvjet GEMMs read the
 # scale before the PDL wait (#291), fixed in 13.6.1.10.
-override-dependencies = ["nvidia-cublas==13.6.1.10"]
+# torch 2.13 pins triton 3.7.1, whose block-scaled product (tl.dot_scaled) does not compile with NVFP4's E4M3
+# scales; 3.8 does (3.9 removed the block pointers the GDN kernels in kernels/fla use).
+override-dependencies = ["nvidia-cublas==13.6.1.10", "triton==3.8.0"]
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu130" }

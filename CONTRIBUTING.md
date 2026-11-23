@@ -19,6 +19,7 @@ scheduling, cache, sampler, HTTP and transaction tests. Off the GB10, `bash tool
 CPU-only environment with pip (the pinned CPU PyTorch wheel and `.[test]`; no model, FlashInfer or GPU) and runs the
 same tests; the GitHub CPU workflow uses it. The tested versions are in `constraints/`; `pyproject.toml`'s
 `[tool.uv] constraint-dependencies` repeat them for `uv.lock`, so a version change touches both and `uv lock`.
+Triton is also in `override-dependencies`, because torch pins another version of it.
 
 Also run `python3 tools/check_links.py` for documentation links, and `.venv-cpu/bin/python tools/check_distribution.py` to build an sdist and
 wheel and probe installed runtime assets outside the checkout. CI runs these
