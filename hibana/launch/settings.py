@@ -126,8 +126,13 @@ def profile_defaults(profile: str, target: str, flashnext_experts: str = "w3", t
         # token streams 3.6 GB of weights instead of 5.4. GSM8K-200, four at a time: 95.5% against exact's 96.0%. The
         # lossy-change gate has not run on it: its in-process layers frame prompts for the Qwen targets.
         p["HIBANA_INKLING_TRUNK"] = "fp8"
+        # and expert sharing in decode and verification (keep 4; lossy, Nemotron's selection): 6 experts a request up
+        # to 48 a call, which also cuts a request alone to 6 a row. Same h2h measurement, against the FP8 trunk alone:
+        # 85.2 / 77.2, 107.9 / 144.1 against 68.4 / 66.2, 84.7 / 109.2. At 8-16 streams a flat cap of 20 does better
+        # (exact: +31% / +33% against +5% / +25%), so throughput takes it.
+        p.update(HIBANA_MOE_KEEP="4", HIBANA_MOE_BUDGET="6:48")
         if profile == "throughput":
-            p["HIBANA_MAX_BATCH"] = "16"
+            p.update(HIBANA_MAX_BATCH="16", HIBANA_MOE_BUDGET="20")
         return p
     flashnext = target == "flashnext"
     if profile == "exact":

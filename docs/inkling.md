@@ -11,8 +11,8 @@ hibana chat inkling
 
 It serves text only (the checkpoint's vision tower is not loaded) and drafts with the checkpoint's bundled DSpark
 drafter, verifying drafts exactly in every profile. `exact` serves the checkpoint's own weights; `fast` (the
-default) and `throughput` quantize the attention projections and the vocabulary head to FP8 at load, and
-`throughput` decodes up to 16 requests together. The SSD tier is off for this target.
+default) and `throughput` quantize the attention projections and the vocabulary head to FP8 at load and share
+experts within a budget ([expert sharing](#expert-sharing)), and `throughput` decodes up to 16 requests together. The SSD tier is off for this target.
 
 ## The model
 
@@ -136,7 +136,8 @@ one request: the median of the prompts' decode tokens/s; streams: closed loop, a
 
 | | 1 request, greedy | 1 request, T 0.7 | 2 streams | 4 streams |
 |---|---|---|---|---|
-| `fast` | 68.5 | 65.7 | 84.5 | 109.9 |
+| `fast` | 85.2 | 77.2 | 107.9 | 144.1 |
+| FP8 trunk without expert sharing | 68.5 | 65.7 | 84.5 | 109.9 |
 | `exact` | 56.6 | 51.7 | 72.7 | 99.9 |
 | BF16 trunk, no drafter (`--exact --spec 0`) | 39.6 | 38.9 | 61.0 | 85.7 |
 
@@ -149,7 +150,8 @@ in `fast`.
 `HIBANA_MOE_KEEP` / `HIBANA_MOE_BUDGET` ([operations](operations.md#serving-profiles)) apply to decode and verification
 calls with Nemotron's selection (`route_budget`): every row keeps its top F experts, its other top-8 experts ride
 along when the call's set holds them, and the set grows past the rows' floors by summed routing weight up to the cap.
-No profile sets them. Closed-loop streams over the 18 h2h prompts (thinking off, greedy, `HIBANA_MAX_BATCH=16`),
+`fast` keeps 4 with 6 a request up to 48 a call; `throughput` keeps 4 with a cap of 20, which does better at 8-16
+streams. `exact` shares none. Closed-loop streams over the 18 h2h prompts (thinking off, greedy, `HIBANA_MAX_BATCH=16`),
 all streams' tokens/s, off against keep 4 with a cap of 20:
 
 | | 1 | 2 | 4 | 8 | 16 streams |

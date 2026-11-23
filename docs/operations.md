@@ -244,7 +244,8 @@ Four of the knobs take more than the table shows:
   `HIBANA_MOE_KEEP=0` routes in full. A token's experts depend on the rest of its forward, so a greedy reply can change
   with what else the server runs. Nemotron's selection (22 of 512 experts a token) keeps k as each row's floor, lets a
   row's other top-22 experts ride along when the forward reads them anyway, and fills the cap by summed routing weight
-  ([how](nemotron.md#serving)). Inkling (8 of 128) selects as Nemotron does, in no profile ([numbers](inkling.md#expert-sharing)).
+  ([how](nemotron.md#serving)). Inkling (8 of 128) selects as Nemotron does: `fast` keeps 4 with 6 a request up to 48, `throughput` 4 with a cap of 20
+  ([numbers](inkling.md#expert-sharing)).
 - **`HIBANA_SSM_STATE=fp32|int8|int4|fp16_sr`**: the integer formats quantize each recurrent layer's state per window as
   in LeapQuant ([arXiv 2609.38166](https://arxiv.org/abs/2609.38166); `hibana/cache/ssm_format.py`), a fraction of
   FP32's memory per slot, and need `HIBANA_VERIFY_STATE=reconstruct` (with `snapshots` the state stays FP32). The
