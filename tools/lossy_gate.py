@@ -590,7 +590,9 @@ def summary_md(card: dict) -> str:
              f"prompts `{m['workload']}` (sha256 {m['workload_sha256'][:12]}). Baseline arm: `{m['baseline_dir']}`.", "",
              "Why: " + "; ".join(card["why"]), ""]
     if l1:
-        lines += ["## Layer 1: distribution distance (decode path, 64 rows per forward; floor: baseline at 32 rows)", "",
+        chunk, floor_chunk = CHUNKS.get(m["target"], (CHUNK, FLOOR_CHUNK))
+        scored = "the plain decode step, one row a forward" if chunk == 1 else f"decode path, {chunk} rows per forward"
+        lines += [f"## Layer 1: distribution distance ({scored}; floor: baseline at {floor_chunk} rows)", "",
                   "| domain | positions | KL | floor KL | excess KL [95%] | argmax | floor argmax | within floor |", "|---|---:|---:|---:|---:|---:|---:|---|"]
         for dom, d in sorted(l1.items(), key=lambda kv: kv[0] == "all"):
             e = d["kl_excess"]
