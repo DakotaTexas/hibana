@@ -155,7 +155,7 @@ in `fast`.
 `HIBANA_MOE_KEEP` / `HIBANA_MOE_BUDGET` ([operations](operations.md#serving-profiles)) apply to decode and verification
 calls with Nemotron's selection (`route_budget`): every row keeps its top F experts, its other top-8 experts ride
 along when the call's set holds them, and the set grows past the rows' floors by summed routing weight up to the cap.
-`fast` keeps 4 with 6 a request up to 48 a call; `throughput` keeps 4 with a cap of 20, which does better at 8-16
+`fast` keeps 6 with 16 a request up to 64 a call; `throughput` keeps 4 with a cap of 20, which does better at 8-16
 streams. `exact` shares none. Closed-loop streams over the 18 h2h prompts (thinking off, greedy, `HIBANA_MAX_BATCH=16`),
 all streams' tokens/s, off against keep 4 with a cap of 20:
 
@@ -168,8 +168,22 @@ On the replies' teacher-forced routes, keep 4 with a cap of 20 reads 19.7 expert
 streams (88% of the routing weight kept), 25.4 instead of 44.2 at eight (77%) and 41.3 instead of 66.2 at sixteen
 (83%). One stream reads its own 8 either way. GSM8K-200 four at a time (`exact`, to 1,024 tokens), paired against
 sharing off (95.0%): keep 4 with a cap of 20 93.0% (1 better / 5 worse, p 0.22); keep 4 with 6 a request up to 48,
-which also cuts a request alone to 6 experts a row (1 request: 45.4 -> 53.7 tokens/s), 94.5% (3 / 4). The lossy gate
-has not run on either.
+which also cuts a request alone to 6 experts a row (1 request: 45.4 -> 53.7 tokens/s), 94.5% (3 / 4).
+
+GSM8K did not show what long reasoning does. On GPQA Diamond (198 items, sampled at temperature 1.0 with thinking on,
+16,384-token cap), with `fast`'s FP8 trunk and DSpark, against `exact` without drafts (71.7%):
+
+| Sharing | Experts a 4-row verify call reads (of 18.1) | Verify rows' routing weight kept | GPQA | Paired |
+|---|---|---|---|---|
+| none | 18.1 | 100% | 69.7% | p 0.57 |
+| keep 6, 16 a request (`fast`) | 15.9 | 95.8% | 69.7% | p 0.60 |
+| keep 6, 12 a request | 14.4 | 92.3% | 66.2% | p 0.052 |
+| keep 5, 10 a request | 12.2 | 86.5% | 67.2% | p 0.12 |
+| keep 4, 6 a request | 9.8 | 77.7% | 62.1% | p 0.001 |
+
+The routing columns come from replaying `route_budget` over Inkling's own GPQA reasoning, one call per 4-row window.
+Too little kept routing shows as longer reasoning: keep 4 at 6 a request wrote 1.11x the tokens and ran 66 answers into
+the cap against `exact`'s 47; the BF16 trunk with that sharing scored 63.6%, so the sharing, not the FP8 trunk, cost it.
 
 ## Memory
 
