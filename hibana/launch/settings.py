@@ -127,10 +127,10 @@ def profile_defaults(profile: str, target: str, flashnext_experts: str = "w3", t
         # tools/lossy_gate.py --target inkling judges it, its first layer on the decode step.
         p["HIBANA_INKLING_TRUNK"] = "fp8"
         # and expert sharing in decode and verification (lossy, Nemotron's selection): each row keeps its top 6 of 8
-        # experts, and a call reads at most 16 a request and 64 in all. On GPQA Diamond (sampled with thinking on, 16K
-        # cap) it scores as the FP8 trunk alone, 69.7% each; keep 4 at 6 a request scored 62.1% (p 0.001 against
-        # exact): its verify rows kept 78% of their routing weight on Inkling's reasoning, and answers thought longer
-        # and ran into the cap. Keep 5 at 10 and keep 6 at 12 scored 67.2% and 66.2%.
+        # experts, and a call reads at most 16 a request and 64 in all, so it binds only inside a request alone (a
+        # 4-row verify reads 15.8 of 18 experts: +7% at one request). On GPQA Diamond (sampled with thinking on, 16K
+        # cap, 4 requests) it scores as the FP8 trunk alone, 69.7% each; sharing that binds across requests cost long
+        # reasoning: 64.1% at 24 a call, 62.1% at keep 4 with 6 a request (answers thought longer, ran into the cap).
         p.update(HIBANA_MOE_KEEP="6", HIBANA_MOE_BUDGET="16:64")
         if profile == "throughput":
             # a flat cap of 20 at keep 4 did better at 8-16 streams (exact: +31% / +33% against +5% / +25%)

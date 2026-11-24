@@ -171,19 +171,23 @@ sharing off (95.0%): keep 4 with a cap of 20 93.0% (1 better / 5 worse, p 0.22);
 which also cuts a request alone to 6 experts a row (1 request: 45.4 -> 53.7 tokens/s), 94.5% (3 / 4).
 
 GSM8K did not show what long reasoning does. On GPQA Diamond (198 items, sampled at temperature 1.0 with thinking on,
-16,384-token cap), with `fast`'s FP8 trunk and DSpark, against `exact` without drafts (71.7%):
+16,384-token cap, 4 requests at a time), each setting with the FP8 trunk and DSpark, paired with the FP8 trunk
+without sharing (69.7%). The budget is per call, min(cap, per-request x requests): a request's 4-row verify reads
+18.0 experts unshared, four requests' 16 rows 46.0 (replaying `route_budget` over Inkling's own GPQA reasoning).
 
-| Sharing | Experts a 4-row verify call reads (of 18.1) | Verify rows' routing weight kept | GPQA | Paired |
+| Sharing | Experts a call reads, 1 / 4 requests | GPQA | Paired | Answers at the cap |
 |---|---|---|---|---|
-| none | 18.1 | 100% | 69.7% | p 0.57 |
-| keep 6, 16 a request (`fast`) | 15.9 | 95.8% | 69.7% | p 0.60 |
-| keep 6, 12 a request | 14.4 | 92.3% | 66.2% | p 0.052 |
-| keep 5, 10 a request | 12.2 | 86.5% | 67.2% | p 0.12 |
-| keep 4, 6 a request | 9.8 | 77.7% | 62.1% | p 0.001 |
+| keep 6, 16 a request, 64 a call (`fast`) | 15.8 / 45.9 | 69.7% | 12 / 12, p 1.0 | 51 of 51 |
+| keep 6, 16 a request, 24 a call | 15.8 / 37.4 | 64.1% | p 0.061 | 63 |
+| keep 6, 12 a request, 64 a call | 14.4 / - | 66.2% | p 0.21 | 58 |
+| keep 5, 10 a request, 64 a call | 12.2 / - | 67.2% | p 0.38 | 56 |
+| keep 4, 6 a request, 48 a call | 9.8 / 28.7 | 62.1% | p 0.014 | 66 |
 
-The routing columns come from replaying `route_budget` over Inkling's own GPQA reasoning, one call per 4-row window.
-Too little kept routing shows as longer reasoning: keep 4 at 6 a request wrote 1.11x the tokens and ran 66 answers into
-the cap against `exact`'s 47; the BF16 trunk with that sharing scored 63.6%, so the sharing, not the FP8 trunk, cost it.
+Sharing that binds across requests costs long reasoning: answers think longer and run into the cap (keep 4 at 6 a
+request wrote 1.10x the tokens; the BF16 trunk with it scored 63.6%, so the sharing, not the FP8 trunk, cost it). The
+share of routing weight kept does not predict it: keep 6 at 24 a call kept 95% of four requests' routing and lost 5.6
+points. So `fast` shares only inside a request alone, whose verify rows read 15.8 of 18.0 experts (+7% at one request);
+from two requests on, 64 a call is above what the rows need.
 
 ## Memory
 
