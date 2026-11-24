@@ -202,7 +202,7 @@ the config file wins. `/get_server_info` reports the profile under `config`.
 | Knob | exact | fast (default) | throughput |
 |---|---|---|---|
 | Relaxed acceptance, greedy requests (`HIBANA_ACCEPT_DEFAULT`) | off | top-3 within 2.0 logits; Flash-Next DFlash2 top-2 within 1.0; Bolt off | as fast |
-| Relaxed acceptance, sampled requests (`HIBANA_ACCEPT_SOFT`, `accept_soft` in the [API](api.md)) | 0 (exact) | Flash-Next and Nemotron s = 0.5; the 27B and Bolt 0 (exact) | as fast |
+| Relaxed acceptance, sampled requests (`HIBANA_ACCEPT_SOFT`, `accept_soft` in the [API](api.md)) | 0 (exact) | Flash-Next and Nemotron s = 0.5; Inkling 0.25; the 27B and Bolt 0 (exact) | as fast |
 | Sampled MTP drafts (`HIBANA_MTP_SAMPLE`, [below](#sampled-mtp-drafts)) | off | on where MTP drafts | as fast |
 | Calibrated 3-bit decode copies (`HIBANA_W3_DECODE`; on Flash-Next and Nemotron also the routed experts; Bolt's trunk and vocabulary head) | off | on | on |
 | Device-resident acceptance (`HIBANA_DEVICE_ACCEPT`) | off | Flash-Next and Nemotron | as fast |
@@ -220,6 +220,7 @@ it; `accept_soft: 0` pins exact sampling. Sampled with thinking on at 4 requests
 Flash-Next with MTP at 216 tok/s against 183 exact, and the 27B with DFlash2 at 195 against 165. On GPQA-D with thinking
 at a 64K cap (Flash-Next, 99 items, paired) s = 0.5 scored 81.8% against 84.8% exact (p 0.51) with answers 18% longer,
 so on long reasoning the faster decode buys little: `fast` sets s = 0.5 on Flash-Next and keeps the 27B exact.
+Inkling's DSpark drafts are single tokens, which s scales directly ([Inkling](inkling.md#relaxed-verification)).
 Accepting outright every draft within a K:M rule (257 and 196) cost long reasoning its accuracy: those tokens came out
 at the drafter's probability rather than the target's. The 3-bit copies (3.25 bits per weight, tensor-core kernels for calls of at
 most 128 rows on the 27B, 64 on Flash-Next) cover the 27B's MLPs, FP8 projections and FP8 draft (+9.8 GiB resident) and Flash-Next's trunk and FP8 DFlash2 draft; Flash-Next's

@@ -189,6 +189,17 @@ share of routing weight kept does not predict it: keep 6 at 24 a call kept 95% o
 points. So `fast` shares only inside a request alone, whose verify rows read 15.8 of 18.0 experts (+7% at one request);
 from two requests on, 64 a call is above what the rows need.
 
+## Relaxed verification
+
+`fast` accepts sampled requests' drafts with soft acceptance s = 0.25 and verifies greedy requests exactly. DSpark's
+drafts are single tokens, so a drafted token y is accepted with probability min(1, p(y) e^s) instead of p(y): s scales
+every draft's acceptance directly. GPQA Diamond (198, sampled, thinking on, `exact` with 16 requests, drafts verified at
+every batch size, paired with exact acceptance at 68.7%): s = 0.25 68.7% (53 answers at the cap against 51); s = 0.5
+61.6% (p 0.016, 67 at the cap, 1.09x the tokens). Sampled h2h (T 0.7) on `fast`, two passes each: one request
+66.5 -> 73.8 tok/s at s = 0.25 (75.1 at 0.5), 2 streams 85.0 -> 88.2, 4 streams 110.9 -> 114.8. Greedy relaxed
+acceptance cost MMLU-Pro greedy (200, thinking on): top-3 within 2.0 77.0% against 83.5% (p 0.004), top-2 within 1.0
+79.5% against 82.0% (p 0.27), so greedy requests stay exact.
+
 ## Memory
 
 Loaded weights take 18 GiB: the packed experts (12.4 GiB), which every path reads as stored, the trunk, embeddings

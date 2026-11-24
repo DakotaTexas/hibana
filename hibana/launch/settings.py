@@ -132,6 +132,11 @@ def profile_defaults(profile: str, target: str, flashnext_experts: str = "w3", t
         # cap, 4 requests) it scores as the FP8 trunk alone, 69.7% each; sharing that binds across requests cost long
         # reasoning: 64.1% at 24 a call, 62.1% at keep 4 with 6 a request (answers thought longer, ran into the cap).
         p.update(HIBANA_MOE_KEEP="6", HIBANA_MOE_BUDGET="16:64")
+        # sampled requests: soft acceptance s = 0.25. DSpark's drafts are single tokens, so the rule accepts a draft
+        # with min(1, p e^s): GPQA (sampled, thinking on, 16 requests) 68.7% at s = 0.25 and at exact, 61.6% at
+        # s = 0.5 (longer answers, more at the cap). T 0.7 h2h: one request +11%, 2 / 4 streams +4%. Greedy requests
+        # stay exact: top-2 within 1.0 scored MMLU-Pro greedy 79.5% against 82.0% (p 0.27).
+        p["HIBANA_ACCEPT_SOFT"] = "0.25"
         if profile == "throughput":
             # a flat cap of 20 at keep 4 did better at 8-16 streams (exact: +31% / +33% against +5% / +25%)
             p.update(HIBANA_MAX_BATCH="16", HIBANA_MOE_KEEP="4", HIBANA_MOE_BUDGET="20")
