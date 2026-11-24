@@ -11,13 +11,16 @@ class FeedbackGraphs:
         self.features = {lid: torch.zeros((proposer.k + 1, proposer.model.feature_width), dtype=torch.bfloat16,
                                           device=proposer.context.device)
                          for lid in proposer.model.features}
+        # the target's final norm rows, for a draft that taps it
+        self.norm = (torch.zeros((proposer.k + 1, proposer.model.feature_width), dtype=torch.bfloat16, device=proposer.context.device)
+                     if getattr(proposer, 'final_norm', False) else None)
         self.metadata = torch.zeros(2, dtype=torch.int64, device=proposer.context.device)
         self.graphs, self.steps = {}, {}
 
     @property
     def bytes(self):
         return sum(t.numel() * t.element_size()
-                   for t in (*self.features.values(), self.metadata, *self.steps.values()))
+                   for t in (*self.features.values(), self.metadata, *self.steps.values(), *([] if self.norm is None else [self.norm])))
 
     def capture(self, log=None):
         p = self.proposer
@@ -27,7 +30,9 @@ class FeedbackGraphs:
             steps = self.steps[count] = torch.arange(count, dtype=torch.int64, device=p.context.device)
 
             def forward():
-                hidden = p.model.project_features({lid: rows[:count] for lid, rows in self.features.items()})
+                layers = {lid: rows[:count] for lid, rows in self.features.items()}
+                hidden = (p.model.project_features(layers) if self.norm is None
+                          else p.model.project_features(layers, self.norm[:count]))
                 positions = steps + self.metadata[0]
                 ring = positions % p.window
                 rows = self.metadata[1] * p.window + ring
@@ -44,6 +49,8 @@ class FeedbackGraphs:
         start, state = req.committed_len - count, req.proposer_state
         for lid, buffer in self.features.items():
             buffer[:count].copy_(features.layers[lid][row, :count])
+        if self.norm is not None:
+            self.norm[:count].copy_(features.norm[row, :count])
         # A fresh pinned allocation keeps queued metadata alive independently
         # of later host writes. All copies and replay use the caller's stream.
         metadata = torch.tensor([start, state.slot], dtype=torch.int64, pin_memory=True)

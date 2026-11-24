@@ -829,7 +829,8 @@ def serve(host: str, port: int, log=print, spec: int = 0, proposer: str = "mtp",
         from hibana.proposers.factory import draft_snapshot
         if proposer == 'dflash2':  # fail before loading the target
             draft = json.loads((draft_snapshot(proposer, draft_dir, served) / 'config.json').read_text())
-            if draft['hidden_size'] != served.hidden_size or max(draft['dflash_config']['target_layer_ids']) >= served.num_layers:
+            taps = draft['dflash_config']['target_layer_ids']
+            if draft['hidden_size'] != served.hidden_size or max(taps[:-1] if taps[-1] == served.num_layers else taps) >= served.num_layers:
                 raise ValueError(f"the DFlash2 draft (hidden {draft['hidden_size']}, taps {draft['dflash_config']['target_layer_ids']}) "
                                  f"was not trained on {served.name} (hidden {served.hidden_size}, {served.num_layers} layers)")
 

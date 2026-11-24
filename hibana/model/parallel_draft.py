@@ -88,6 +88,9 @@ def convolve(x, coefficients, base):
 
 
 class ParallelDraftModel:
+    final_norm = False  # the last tap is the target's final norm
+    unary_softcap = score_softcap = None
+
     def __init__(self, snapshot, target, max_context, *, precision='bf16'):
         if precision not in ('bf16', 'fp8'):
             raise ValueError('unsupported draft precision')
@@ -107,8 +110,18 @@ class ParallelDraftModel:
         self.target, self.device = target, target.device
         from hibana.proposers.draft_head import TargetHead
         self.draft_head = TargetHead(lambda x: self.target.head_logits(x))  # the vocabulary projection the selector reads; resolved per call
-        self.features = tuple(cfg['dflash_config']['target_layer_ids'])
+        taps = tuple(cfg['dflash_config']['target_layer_ids'])
+        # A last tap one past the target's layers is its final norm (Inkling's drafters), which the target computes anyway
+        layers = getattr(getattr(target, 'target', None), 'num_layers', None)
+        self.final_norm = layers is not None and taps[-1] == layers
+        self.features = taps[:-1] if self.final_norm else taps
         self.mask_token = cfg['dflash_config']['mask_token_id']
+        # The selector's softcap: on the head's logits (the default), or on its scores after the predecessor correction
+        softcap = cfg['dflash_config'].get('final_logit_softcapping')
+        mode = cfg['dflash_config'].get('selector_softcap_mode', 'before_correction')
+        if mode not in ('before_correction', 'after_correction'):
+            raise ValueError(f'unsupported selector softcap mode {mode!r}')
+        self.unary_softcap, self.score_softcap = (softcap, None) if mode == 'before_correction' else (None, softcap)
         self.window = cfg['sliding_window']
         self.cos, self.sin = frequencies(cfg, max_context + 32, self.device)
         self.weights = {name: weight.to(self.device) for name, weight in self.read_weights(snapshot, cfg).items()}
@@ -153,10 +166,12 @@ class ParallelDraftModel:
     @property
     def feature_width(self) -> int:
         """The width of each tapped target layer's rows: what `fc` projects, per tap."""
-        return self.weights['fc.weight'].shape[1] // len(self.features)
+        return self.weights['fc.weight'].shape[1] // (len(self.features) + self.final_norm)
 
-    def project_features(self, features):
-        joined = torch.cat([features[i] for i in self.features], dim=-1)
+    def project_features(self, features, norm=None):
+        """The target's rows at the draft's taps ({layer: [N, W]}, and its final norm [N, W] when the draft taps it)
+        -> the draft's context rows [N, hidden]."""
+        joined = torch.cat([features[i] for i in self.features] + ([norm] if self.final_norm else []), dim=-1)
         return rms(joined @ self.weights['fc.weight'].T, self.weights['hidden_norm.weight'])
 
     def context_kv(self, hidden, positions, caches, pages):
@@ -173,13 +188,19 @@ class ParallelDraftModel:
     def _finish_conv(self, hidden, coefficients, name):
         return convolve(hidden, coefficients, self.weights[name + '.base_kernel'][1])
 
+    def embed(self, tokens):
+        """The block's inputs: the target's own token embedding (Inkling's applies its embedding norm)."""
+        if hasattr(self.target, 'embed_ids'):
+            return self.target.embed_ids(tokens.reshape(-1)).view(*tokens.shape, -1)
+        return F.embedding(tokens, self.target.embed)
+
     def attend(self, query, cache, attention, layer):
         return attention.run(query, cache)
 
     def forward(self, tokens, positions, pages, caches, attention):
         """Static noise-block forward. attention is a planned FlashInfer wrapper."""
         batch, steps = tokens.shape
-        hidden = F.embedding(tokens, self.target.embed)
+        hidden = self.embed(tokens)
         for layer in range(self.layers):
             p = f'layers.{layer}.'
             residual = hidden
@@ -213,5 +234,10 @@ class ParallelDraftModel:
         predecessors = torch.cat([anchor[:, None, None].expand(-1, 1, candidates.shape[-1]), candidates[:, :-1]], dim=1)
         a = self.weights[p + 'predecessor_codebook'][predecessors]
         b = self.weights[p + 'successor_codebook'][candidates]
-        scores = (a * gate[:, :, None]) @ b.transpose(-1, -2)
-        return candidates, scores + values[:, :, None]
+        unary, score = getattr(self, 'unary_softcap', None), getattr(self, 'score_softcap', None)
+        if unary:
+            values = torch.tanh(values.float() / unary) * unary
+        scores = (a * gate[:, :, None]) @ b.transpose(-1, -2) + values[:, :, None]
+        if score:
+            scores = torch.tanh(scores.float() / score) * score
+        return candidates, scores
