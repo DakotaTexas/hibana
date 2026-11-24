@@ -333,6 +333,26 @@ def test_ssd_resume_matches_a_resume_from_memory(tmp_path):
         engine_config.install(before)
 
 
+def test_ssd_store_keeps_trunks_and_sharing_apart():
+    """The SSD store's identity names the trunk format and the expert sharing, so a `fast` server never restores
+    prefixes (K/V, convolution windows, drafter context) that an `exact` server stored, or the other way round."""
+    import json
+    from hibana.engine import config as engine_config
+    before = engine_config.current()
+    seen = []
+    try:
+        for trunk, keep, per, budget in (("bf16", 0, 0, 0), ("fp8", 0, 0, 0), ("fp8", 6, 16, 64)):
+            engine_config.install(before.replace(inkling_trunk=trunk, moe_keep=keep, moe_budget_per_request=per, moe_budget=budget))
+            model = load()
+            seen.append(json.dumps(model.arithmetic_identity, sort_keys=True))
+            del model
+            gc.collect()
+            torch.cuda.empty_cache()
+    finally:
+        engine_config.install(before)
+    assert len(set(seen)) == 3, seen
+
+
 def test_dspark_covers_the_served_context():
     """The drafter is built for the context the engine serves (HIBANA_MAX_CONTEXT), and an executor that serves more
     than it covers is refused at startup: a request past the drafter's positions stopped the engine."""

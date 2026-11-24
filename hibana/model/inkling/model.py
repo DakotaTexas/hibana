@@ -244,6 +244,12 @@ class Inkling:
             # lists end there
             self.draft = InklingDraft(snap, self, current().max_context or target.context_length)
         self.state_slots = 0  # the state pool's slots, once registered
+        # the SSD store keys stored prefixes by the arithmetic that produced them: the trunk's format and expert sharing
+        # (K/V, convolution windows and the drafter's context all differ between them)
+        cfg = current()
+        self.arithmetic_identity = {"trunk": cfg.inkling_trunk}
+        if 0 < cfg.moe_keep < c.EXPERTS_PER_TOKEN:
+            self.arithmetic_identity["moe_sharing"] = f"{cfg.moe_keep}:{cfg.moe_budget_per_request}:{cfg.moe_budget}"
         if log:
             allocated = torch.cuda.memory_allocated() / 2**30 if self.device.type == "cuda" else 0.0
             log(f"  weights loaded in {time.perf_counter() - started:.0f}s, {allocated:.1f} GiB allocated ({self.stream_bytes / 1e9:.2f} GB per decode token)")
