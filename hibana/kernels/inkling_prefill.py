@@ -209,21 +209,38 @@ class Plan(NamedTuple):
 TILE_ROWS = 128  # the expert products' rows a tile
 
 
+@triton.jit
+def _repeated(Ids, at, ids, pairs, TOPK: tl.constexpr):
+    """Pairs naming an expert their token named in an earlier slot: expert sharing's weight-0 filler."""
+    repeat = at < 0
+    for i in tl.static_range(1, TOPK):
+        earlier = tl.load(Ids + at - i, ((at % TOPK) >= i) & (at < pairs), other=-1).to(tl.int32)
+        repeat = repeat | (earlier == ids)
+    return repeat
+
+
 @triton.jit(do_not_specialize=['pairs'])
 def _place(Ids, Starts, Token, Where, Tiles, pairs, E: tl.constexpr, TOPK: tl.constexpr, BM: tl.constexpr, TILES: tl.constexpr,
-           CHUNK: tl.constexpr):
+           CHUNK: tl.constexpr, REPEATS: tl.constexpr):
     expert = tl.program_id(0)
     lanes = tl.arange(0, CHUNK)
     counts = tl.zeros((E,), tl.int32)
     for start in range(0, pairs, CHUNK):  # every program counts every expert's pairs
         at = start + lanes
-        counts += tl.histogram(tl.load(Ids + at, at < pairs, other=0).to(tl.int32), E, mask=at < pairs)
+        ids = tl.load(Ids + at, at < pairs, other=0).to(tl.int32)
+        live = at < pairs
+        if REPEATS:
+            live = live & ~_repeated(Ids, at, ids, pairs, TOPK)
+        counts += tl.histogram(ids, E, mask=live)
     experts = tl.arange(0, E)
     first = tl.sum(tl.where(experts < expert, counts, 0), 0)
     placed = first
     for start in range(0, pairs, CHUNK):  # this expert's pairs in pair order, so a token's rows stay in order
         at = start + lanes
-        mine = (tl.load(Ids + at, at < pairs, other=-1) == expert) & (at < pairs)
+        ids = tl.load(Ids + at, at < pairs, other=-1).to(tl.int32)
+        mine = (ids == expert) & (at < pairs)
+        if REPEATS:
+            mine = mine & ~_repeated(Ids, at, ids, pairs, TOPK)
         dest = placed + tl.cumsum(mine.to(tl.int32), 0) - 1
         tl.store(Token + dest, at // TOPK, mine)
         tl.store(Where + at, dest.to(tl.int64), mine)
@@ -242,9 +259,10 @@ def _place(Ids, Starts, Token, Where, Tiles, pairs, E: tl.constexpr, TOPK: tl.co
         tl.store(Tiles + tile * 2 + 1, row)
 
 
-def place(ids: torch.Tensor, experts: int) -> Plan:
+def place(ids: torch.Tensor, experts: int, repeats: bool = False) -> Plan:
     """The `Plan` of a wide call's routed ids [T, topk] (int64), on the GPU without a host sync: products are launched
-    for the most tiles any routing can need, and tiles past the last exit."""
+    for the most tiles any routing can need, and tiles past the last exit. With `repeats` (expert sharing's routing),
+    a token's repeats of an expert are left out: they are weight-0 filler, and `combine` skips them."""
     t, topk = ids.shape
     pairs = t * topk
     tiles = triton.cdiv(pairs, TILE_ROWS) + experts
@@ -253,7 +271,7 @@ def place(ids: torch.Tensor, experts: int) -> Plan:
     where = torch.empty(pairs, dtype=torch.int64, device=ids.device)
     table = torch.empty((triton.next_power_of_2(tiles), 2), dtype=torch.int32, device=ids.device)
     _place[(experts,)](ids, starts, token, where, table, pairs, E=experts, TOPK=topk, BM=TILE_ROWS, TILES=table.shape[0], CHUNK=2048,
-                       num_warps=8)
+                       REPEATS=repeats, num_warps=8)
     return Plan(starts, token, where, table[:tiles])
 
 
@@ -481,9 +499,12 @@ def _pair_mm(A, AS, Unit, Ids, W, WS, Factor, Y, SHARE: tl.constexpr, FP4: tl.co
 
 @triton.jit(do_not_specialize=['P'])
 def _expert_mm(A, AS, Unit, Ids, W, WS, Factor, Y, P, PP: tl.constexpr, E: tl.constexpr, SHARE: tl.constexpr, FP4: tl.constexpr,
-               N: tl.constexpr, K: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr, GATE_CAP: tl.constexpr, UP_CAP: tl.constexpr):
+               N: tl.constexpr, K: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr, GATE_CAP: tl.constexpr, UP_CAP: tl.constexpr,
+               TOPK: tl.constexpr):
     """`_pair_mm` for calls of many pairs, grouped on the device: program (g, column tile) multiplies all the pairs of
-    the g-th expert present in Ids (a row picks an expert once, so at most BM) in one product."""
+    the g-th expert present in Ids in one product. A row's later repeats of an expert are skipped (their rows of Y are
+    not written): expert sharing fills a row's unused slots with its top expert at weight 0, and without the skip one
+    expert could hold more pairs than BM; with it, an expert has at most a pair a row, so at most BM."""
     g = tl.program_id(0)
     p = tl.arange(0, PP)
     ids = tl.load(Ids + p, p < P, other=-1).to(tl.int32)
@@ -492,7 +513,11 @@ def _expert_mm(A, AS, Unit, Ids, W, WS, Factor, Y, P, PP: tl.constexpr, E: tl.co
     if g >= tl.sum(present, 0):
         return
     expert = tl.sum(tl.where((present == 1) & (tl.cumsum(present, 0) - present == g), e, 0), 0)
-    mine = ids == expert
+    row_ids = tl.reshape(ids, (PP // TOPK, TOPK))
+    j = tl.arange(0, TOPK)
+    earlier = (row_ids[:, :, None] == row_ids[:, None, :]) & (j[:, None] < j[None, :])[None, :, :]  # [row, i, j]: slot i < j, same expert
+    repeat = tl.reshape(tl.max(earlier.to(tl.int32), 1), (PP,)) > 0
+    mine = (ids == expert) & ~repeat
     slot = tl.arange(0, BM)
     match = ((tl.cumsum(mine.to(tl.int32), 0) - 1)[None, :] == slot[:, None]) & mine[None, :]
     pair = tl.sum(tl.where(match, p[None, :], 0), 1).to(tl.int64)  # the expert's pairs in slots 0, 1, ...
@@ -534,8 +559,8 @@ def pair_mm(rows: tuple, ids: torch.Tensor, share: int, weight: torch.Tensor, sc
             swiglu: tuple[float, float] | None = None) -> torch.Tensor:
     """`grouped_mm4` / `grouped_mm8` for the few rows of a decode or verification call, a program a (pair, output
     tile) with no sorting (it runs in a captured graph): pair p multiplies row p // share of `rows` (what
-    `quantize_nvfp4` or `quantize_mxfp8` returned) by expert ids.flatten()[p] (int64 [T, k], each row's experts
-    distinct). -> BF16 [P, N]; with `swiglu` =
+    `quantize_nvfp4` or `quantize_mxfp8` returned) by expert ids.flatten()[p] (int64 [T, k]; a row repeats an expert
+    only as weight-0 filler, whose rows the grouped path leaves unwritten for `combine` to skip). -> BF16 [P, N]; with `swiglu` =
     (gate cap, up cap), the activation of the gate/up column pairs instead, BF16 [P, N / 2], bitwise `_swiglu` of
     the BF16 product (a launch less a visit). Rows that share an expert each read it, the later
     ones from cache: with real verification routing a call reads about the distinct experts' bytes once."""
@@ -555,7 +580,7 @@ def pair_mm(rows: tuple, ids: torch.Tensor, share: int, weight: torch.Tensor, sc
         _expert_mm[(min(pairs, experts), n // 64)](codes, scales, unit, ids, weight, scale.view(torch.float8_e4m3fn) if fp4 else scale, factor, out,
                                                    P=pairs, PP=triton.next_power_of_2(pairs), E=experts, SHARE=share, FP4=fp4, N=n, K=k,
                                                    BM=max(16, triton.next_power_of_2(ids.shape[0])), BN=64,
-                                                   BK=512 if fp4 else 256, GATE_CAP=gate_cap, UP_CAP=up_cap, num_warps=4, num_stages=2)
+                                                   BK=512 if fp4 else 256, GATE_CAP=gate_cap, UP_CAP=up_cap, TOPK=ids.shape[1], num_warps=4, num_stages=2)
         return out
     _pair_mm[(ids.numel(), n // (bn * steps))](codes, scales, unit, ids, weight, scale.view(torch.float8_e4m3fn) if fp4 else scale, factor, out,
                                                SHARE=share, FP4=fp4, N=n, K=k, KM=main, KT=k - main, VB=2 if fp4 else 1, G=16 if fp4 else 32, BM=16, BN=bn,

@@ -1042,8 +1042,12 @@ __global__ void __launch_bounds__(256) combine_kernel(const uint16_t* __restrict
   }
   float v = 0.f;
   for (int k = 0; k < topk; ++k) {
+    const float w = weights[t * topk + k];
+    if (w == 0.f) {
+      continue;  // expert sharing's filler slots: their rows of `down` may be unwritten
+    }
     const int64_t row = where != nullptr ? where[t * topk + k] : t * topk + k;
-    v = fmaf(weights[t * topk + k], bf16_to_float(down[row * hidden + h]), v);
+    v = fmaf(w, bf16_to_float(down[row * hidden + h]), v);
   }
   out[t * hidden + h] = float_to_bf16(v);
 }

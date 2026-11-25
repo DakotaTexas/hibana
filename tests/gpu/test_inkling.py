@@ -192,6 +192,29 @@ def test_decode_and_prefill_experts_agree(fp4, rows):
     assert cosine(packed, dense) > 0.9999 and dense.float().abs().mean() > 0.01
 
 
+@pytest.mark.parametrize("fp4", [True, False])
+def test_shared_experts_agree_on_both_paths(fp4):
+    """Expert sharing at 64 rows (16 requests x 4), the rows alike and a budget under a row's 8 experts, so each row
+    fills its unused slots with its top expert at weight 0: that expert holds 5 x 64 pairs. Decode's grouped pair path
+    against the sorted prefill path on the same budgeted routing; a grouped path that kept only its first 64 pairs
+    an expert dropped later rows' real pairs and read unwritten rows."""
+    w = layer_weights(3, fp4)
+    moe = Moe(w, f"{c.PREFIX}.layers.3.mlp", DEVICE)
+    moe.keep, moe.per_request, moe.budget = 2, 0, 4
+    gen = torch.Generator().manual_seed(5)
+    x = (torch.randn((1, H), generator=gen) + 0.05 * torch.randn((64, H), generator=gen)).to(torch.bfloat16).to(DEVICE)
+    slots = torch.arange(1, 17, dtype=torch.int32, device=DEVICE)
+    ids, weights = moe.share(x, slots, 4)
+    assert int(torch.bincount(ids.flatten()).max()) > 64 and int((weights == 0).sum()) > 0
+    packed = moe(x, slots, 4)
+    Moe.pair_calls = False
+    try:
+        dense = moe(x, slots, 4)
+    finally:
+        Moe.pair_calls = True
+    assert torch.isfinite(packed).all() and cosine(packed, dense) > 0.9999
+
+
 def test_decode_continues_what_prefill_computes():
     """On the pinned checkpoint: tokens decoded through the engine (chunked prefill, conv windows and K/V carried in
     the pools, decode graphs) against one stand-alone prefill of prompt plus output. The pool keeps BF16 K/V as the

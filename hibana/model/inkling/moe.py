@@ -81,9 +81,10 @@ class Moe:
             act = prefill.pair_mm(quantize(x), ids, c.EXPERTS_PER_TOKEN, *self.packed[:3], swiglu=(c.GATE_SOFTCAP, c.UP_SOFTCAP))
             down = prefill.pair_mm(quantize(act), ids, 1, *self.packed[3:])
             return kernels.combine(down, None, weights)
-        ids, weights = self.route(x)
+        shared = bool(self.keep) and slots is not None
+        ids, weights = self.share(x, slots, steps) if shared else self.route(x)
         # pairs sorted by expert on the GPU (no host sync): each expert multiplies one run of rows, one launch a projection
-        plan = prefill.place(ids, c.NUM_EXPERTS)
+        plan = prefill.place(ids, c.NUM_EXPERTS, repeats=shared)
         if nvfp4:
             hidden = prefill.grouped_mm4(*prefill.quantize_nvfp4(x.contiguous()), plan, True, *self.packed[:3])
             down = prefill.grouped_mm4(*prefill.swiglu_quantize(hidden, True, c.GATE_SOFTCAP, c.UP_SOFTCAP), plan, False, *self.packed[3:])
