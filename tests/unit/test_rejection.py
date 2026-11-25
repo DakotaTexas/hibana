@@ -121,6 +121,30 @@ def test_vectorized_verify_matches_sequential_reference_in_distribution():
     assert sum(vec.values()) == n
 
 
+def test_a_rejection_with_no_residual_mass_draws_from_the_target():
+    """Both laws a point mass on one token with p_y under q_y: exact math never rejects there, float32 can (p_y a few
+    ulp under q_y), and max(p - q, 0) then has no mass. Every path draws the correction from p instead of sampling a
+    zero law (an assert) or, by inverse CDF, another candidate. q_y = 1.5 stands in for the rounding so that a third
+    of the draws reject."""
+    from hibana.engine.rejection import verify_batch, verify_rows
+
+    p = torch.zeros(2, 4)
+    p[:, 2] = 1.0
+    q, support, tokens = torch.tensor([[1.5]]), torch.tensor([[2]]), torch.tensor([2])
+    logits = torch.full((1, 2, 4), -30.0)
+    logits[..., 2] = 30.0
+    params = SamplingParams(temperature=1.0, top_p=0.95)
+    rejected = 0
+    for seed in range(48):
+        a, c, _ = verify_rows(tokens, p, q, support, torch.Generator().manual_seed(seed))
+        assert int(c) == 2
+        rejected += int(a) == 0
+        assert verify_row(tokens, p, q, support, torch.Generator().manual_seed(seed))[1] == 2
+        a, c, _, _ = verify_batch(tokens[None], logits, [params], [torch.Generator().manual_seed(seed)], q[None], support[None])
+        assert int(c[0]) == 2
+    assert rejected > 0
+
+
 def test_vectorized_verify_deterministic_draft_and_sparse_support():
     from hibana.engine.rejection import verify_rows
 
