@@ -619,43 +619,77 @@ __global__ void __launch_bounds__(kMixThreads) rms_kernel(const void* __restrict
 // rms(m) * weight. A gate reads 1.8 MB of weights, so `low` runs on `gemv` and the steps after it spread over many
 // blocks (one block took 300 us).
 
-// grid (outputs * rows, H / 64): the gated values in place, and each block's sum of their squares.
-// low [rows, outputs, rank] BF16; forget, gain [G, H, rank] BF16; squares [outputs * rows, H / 64].
+// grid (H / 64, outputs, ceil(rows / R)): the gated values in place, and each (row, 64 channels)'s sum of their
+// squares. Four threads a channel each hold a quarter of the channel's forget and gain rows (rank 64) in registers and
+// run the block's R rows past them, so a gate's 0.6 MB of forget and gain weights are read once per R rows (a block a
+// (row, 64 channels) re-read them every row: 0.28 ms at 128 rows of three gates). Each value and sum is the same
+// arithmetic in the same order as there: a quarter's 16 products in order, the quarters added in order, `block_sum`'s.
+// low: row r of gate j at low + r * low_row + j * low_out, BF16; forget, gain [G, H, 64] BF16; squares [outputs * rows, H / 64].
+template <int R>
 __global__ void __launch_bounds__(256) gate_apply_kernel(float* __restrict__ gated, const float* __restrict__ message,
-                                                         const uint16_t* __restrict__ low, const uint16_t* __restrict__ forget,
-                                                         const uint16_t* __restrict__ gain, float* __restrict__ squares,
-                                                         int rows, int g0, int rank, int hidden) {
-  __shared__ float fpart[256];
-  __shared__ float gpart[256];
-  __shared__ float scratch[8];
-  const int po = blockIdx.x, t = threadIdx.x;
-  const int j = po / rows, row = po % rows, g = g0 + j;
-  const int h = 64 * blockIdx.y + t / 4, run = t % 4;
-  const int width = rank / 4;
-  const uint16_t* lw = low + (static_cast<int64_t>(row) * (gridDim.x / rows) + j) * rank;
-  const uint16_t* fw = forget + (static_cast<int64_t>(g) * hidden + h) * rank;
-  const uint16_t* gw = gain + (static_cast<int64_t>(g) * hidden + h) * rank;
-  float f = 0.f, m = 0.f;
-  for (int k = run * width; k < (run + 1) * width; ++k) {
-    const float l = bf16_to_float(lw[k]);
-    f = fmaf(bf16_to_float(fw[k]), l, f);
-    m = fmaf(bf16_to_float(gw[k]), l, m);
+                                                         const uint16_t* __restrict__ low, int64_t low_row, int64_t low_out,
+                                                         const uint16_t* __restrict__ forget, const uint16_t* __restrict__ gain,
+                                                         float* __restrict__ squares, int rows, int g0, int hidden) {
+  constexpr int kRank = 64, kWidth = kRank / 4;
+  __shared__ float scratch[R][8];
+  const int t = threadIdx.x, lane = t % 32, warp = t / 32, j = blockIdx.y, g = g0 + j;
+  const int h = 64 * blockIdx.x + t / 4, run = t % 4;
+  const int64_t wat = (static_cast<int64_t>(g) * hidden + h) * kRank + run * kWidth;
+  float fw[kWidth], gw[kWidth];
+  {
+    const uint4* fp = reinterpret_cast<const uint4*>(forget + wat);
+    const uint4* gp = reinterpret_cast<const uint4*>(gain + wat);
+    const uint4 f0 = fp[0], f1 = fp[1], q0 = gp[0], q1 = gp[1];
+    const uint32_t fv[8] = {f0.x, f0.y, f0.z, f0.w, f1.x, f1.y, f1.z, f1.w}, gv[8] = {q0.x, q0.y, q0.z, q0.w, q1.x, q1.y, q1.z, q1.w};
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+      fw[2 * i] = __uint_as_float(fv[i] << 16);
+      fw[2 * i + 1] = __uint_as_float(fv[i] & 0xFFFF0000u);
+      gw[2 * i] = __uint_as_float(gv[i] << 16);
+      gw[2 * i + 1] = __uint_as_float(gv[i] & 0xFFFF0000u);
+    }
   }
-  fpart[t] = f;
-  gpart[t] = m;
+  const int first = blockIdx.z * R, count = min(R, rows - first);
+  for (int i = 0; i < count; ++i) {
+    const int row = first + i;
+    const uint4* lp = reinterpret_cast<const uint4*>(low + row * low_row + j * low_out + run * kWidth);
+    const uint4 l0 = lp[0], l1 = lp[1];
+    const uint32_t lv[8] = {l0.x, l0.y, l0.z, l0.w, l1.x, l1.y, l1.z, l1.w};
+    float f = 0.f, m = 0.f;
+#pragma unroll
+    for (int k = 0; k < 8; ++k) {
+      const float a = __uint_as_float(lv[k] << 16), b = __uint_as_float(lv[k] & 0xFFFF0000u);
+      f = fmaf(fw[2 * k], a, f);
+      m = fmaf(gw[2 * k], a, m);
+      f = fmaf(fw[2 * k + 1], b, f);
+      m = fmaf(gw[2 * k + 1], b, m);
+    }
+    const float f1 = __shfl_down_sync(0xffffffffu, f, 1), f2 = __shfl_down_sync(0xffffffffu, f, 2), f3 = __shfl_down_sync(0xffffffffu, f, 3);
+    const float m1 = __shfl_down_sync(0xffffffffu, m, 1), m2 = __shfl_down_sync(0xffffffffu, m, 2), m3 = __shfl_down_sync(0xffffffffu, m, 3);
+    float square = 0.f;
+    if (run == 0) {
+      f = f + f1 + f2 + f3;
+      m = m + m1 + m2 + m3;
+      const int64_t at = (static_cast<int64_t>(j) * rows + row) * hidden + h;
+      const float value = (1.f - tanhf(f)) * gated[at] + tanhf(m) * message[at];
+      gated[at] = value;
+      square = value * value;
+    }
+    for (int off = 16; off > 0; off >>= 1) {
+      square += __shfl_xor_sync(0xffffffffu, square, off);
+    }
+    if (lane == 0) {
+      scratch[i][warp] = square;
+    }
+  }
   __syncthreads();
-  float square = 0.f;
-  if (run == 0) {
-    f = fpart[t] + fpart[t + 1] + fpart[t + 2] + fpart[t + 3];
-    m = gpart[t] + gpart[t + 1] + gpart[t + 2] + gpart[t + 3];
-    const int64_t at = static_cast<int64_t>(po) * hidden + h;
-    const float value = (1.f - tanhf(f)) * gated[at] + tanhf(m) * message[at];
-    gated[at] = value;
-    square = value * value;
-  }
-  square = block_sum(square, scratch);
-  if (t == 0) {
-    squares[static_cast<int64_t>(po) * (hidden / 64) + blockIdx.y] = square;
+  if (t < count) {
+    float total = 0.f;
+#pragma unroll
+    for (int w = 0; w < 8; ++w) {
+      total += scratch[t][w];
+    }
+    squares[(static_cast<int64_t>(j) * rows + first + t) * (hidden / 64) + blockIdx.x] = total;
   }
 }
 
@@ -1200,15 +1234,33 @@ torch::Tensor mix(torch::Tensor states, int64_t count, torch::Tensor partial, to
 #undef LAUNCH_MIX
   if (gated) {
     const int pairs = rows * outputs;
-    // low [rows, outputs, rank]: every gate's pair through its own down projection, in one launch for a few rows
+    // low: every gate's pair through its own down projection, [rows, outputs, rank] in one launch for a few rows,
+    // else [outputs, rows, rank] from bmm (the gate kernel reads either where it is)
     auto downs = down.narrow(0, g0, outputs);
-    auto low = rows <= kGemvRows ? gemv(pair, downs.reshape({outputs * rank, 2 * hidden}), outputs > 1 ? rank : outputs * rank,
-                                        outputs > 2 ? 2 * rank : outputs * rank, pair.new_empty(0))
-                                 : torch::bmm(pair, downs.transpose(1, 2)).transpose(0, 1).contiguous();
-    gate_apply_kernel<<<dim3(pairs, hidden / 64), 256, 0, stream>>>(vp, gp, reinterpret_cast<const uint16_t*>(low.data_ptr()),
-                                                                   reinterpret_cast<const uint16_t*>(forget.data_ptr()),
-                                                                   reinterpret_cast<const uint16_t*>(gain.data_ptr()),
-                                                                   squares.data_ptr<float>(), rows, g0, rank, hidden);
+    const bool few = rows <= kGemvRows;
+    auto low = few ? gemv(pair, downs.reshape({outputs * rank, 2 * hidden}), outputs > 1 ? rank : outputs * rank,
+                          outputs > 2 ? 2 * rank : outputs * rank, pair.new_empty(0))
+                   : torch::bmm(pair, downs.transpose(1, 2));
+    check(low.is_contiguous() && reinterpret_cast<uintptr_t>(low.data_ptr()) % 16 == 0 &&
+              reinterpret_cast<uintptr_t>(forget.data_ptr()) % 16 == 0 && reinterpret_cast<uintptr_t>(gain.data_ptr()) % 16 == 0,
+          "gate tensors must be 16-byte aligned");
+    const int64_t low_row = few ? outputs * rank : rank, low_out = few ? rank : static_cast<int64_t>(rows) * rank;
+    const auto* lp = reinterpret_cast<const uint16_t*>(low.data_ptr());
+    const auto* fp = reinterpret_cast<const uint16_t*>(forget.data_ptr());
+    const auto* np = reinterpret_cast<const uint16_t*>(gain.data_ptr());
+#define LAUNCH_GATE(R)                                                                                                                  \
+  gate_apply_kernel<R><<<dim3(hidden / 64, outputs, (rows + (R) - 1) / (R)), 256, 0, stream>>>(vp, gp, lp, low_row, low_out, fp, np, \
+                                                                                              squares.data_ptr<float>(), rows, g0, hidden)
+    if (rows <= 4) {  // rows a block: at 1-4 rows a block a row (as before, 2.5-14 -> 1.7-6 us), then the fastest measured
+      LAUNCH_GATE(1);
+    } else if (rows <= 16) {
+      LAUNCH_GATE(4);
+    } else if (rows <= 64) {  // 64 rows: 50 -> 12 us (one gate), 143 -> 29 (three)
+      LAUNCH_GATE(8);
+    } else {  // 128 rows: 97 -> 21 us, 284 -> 54
+      LAUNCH_GATE(16);
+    }
+#undef LAUNCH_GATE
     gate_norm_kernel<<<dim3(pairs, hidden / 256), 256, 0, stream>>>(vp, squares.data_ptr<float>(), wp, op, rows, hidden);
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
