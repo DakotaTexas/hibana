@@ -107,9 +107,11 @@ def _nucleus(probs: torch.Tensor, top_p: float, top_k: int) -> torch.Tensor:
 
 
 def corrected_distribution(p, q):
-    """Law at a rejection: max(p-q, 0), normalized. No epsilon mass added."""
+    """Law at a rejection: max(p-q, 0), normalized. No epsilon mass added. A residual with no mass only comes from
+    rounding (e.g. p and q point masses on one token, p_y a few ulp under q_y): the correction is then drawn from p."""
     residual = (p - q).clamp_min(0)
-    return residual / residual.sum(-1, keepdim=True)
+    mass = residual.sum(-1, keepdim=True)
+    return torch.where(mass > 0, residual / mass, p)
 
 
 def verify_row(tokens, p, q, support, generator):
@@ -177,7 +179,6 @@ def verify_rows(tokens, p, q, support, generator, soft_scale: float = 1.0):
     prefix = torch.cumprod(ok.to(torch.int64), dim=0)
     accepted = prefix.sum()
     residual = corrected_distribution(p[:k], q_rows)
-    residual = torch.where(residual.isfinite(), residual, torch.zeros_like(residual))
     laws = torch.cat([residual, p[k:k + 1]], dim=0)  # law at rejection position a, or the bonus law
     law = laws.index_select(0, accepted.reshape(1))
     correction = torch.multinomial(law, 1, generator=generator).reshape(())
@@ -281,12 +282,14 @@ def verify_batch(tokens, logits, params, generators, q=None, support=None, rng=N
     at = accepted.view(b, 1, 1).expand(b, 1, c)
     sel, sel_index = law.gather(1, at).squeeze(1), index.gather(1, at).squeeze(1)  # [B, C]
     rejected = (accepted < k).view(b, 1)
+    p_sel = sel
     if q_at is None:  # max(p - q, 0) for a point mass: p without the drafted token
         drafted = tokens.gather(1, accepted.clamp_max(k - 1).view(b, 1))
         sel = torch.where(rejected & (sel_index == drafted), torch.zeros_like(sel), sel)
     else:
         q_sel = q_at.gather(1, accepted.clamp_max(k - 1).view(b, 1, 1).expand(b, 1, c)).squeeze(1)
         sel = torch.where(rejected, (sel - q_sel).clamp_min(0), sel)
+    sel = torch.where(sel.sum(-1, keepdim=True) > 0, sel, p_sel)  # no residual mass: a rounding rejection, draw from p
     cdf = sel.cumsum(-1)
     draw = torch.searchsorted(cdf, (u[:, k:] * cdf[:, -1:]).contiguous(), right=True).clamp_max(c - 1)
     correction = sel_index.gather(1, draw).squeeze(1)
