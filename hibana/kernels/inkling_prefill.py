@@ -146,17 +146,37 @@ def quantize_mxfp8(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     return values, scales
 
 
+@triton.jit
+def _route_sums(X, Router, r, valid, experts, H: tl.constexpr, BM: tl.constexpr, BE: tl.constexpr, BK: tl.constexpr):
+    """The router logits of rows r for `experts`, FP32 [BM, BE]: BF16 operands, so each product is exact, as in an FP32
+    product of the same values; summed BK at a time in K order, whatever BM and BE."""
+    cols = tl.arange(0, BK)
+    logits = tl.zeros((BM, BE), tl.float32)
+    for k in range(0, H, BK):
+        x = tl.load(X + r[:, None] * H + k + cols[None, :], valid[:, None], other=0.0)
+        logits = tl.dot(x, tl.load(Router + experts[None, :] * H + k + cols[:, None]), logits)
+    return logits
+
+
 @triton.jit(do_not_specialize=['rows'])
-def _route(X, Router, Bias, Ids, Weights, rows, H: tl.constexpr, E: tl.constexpr, TOPK: tl.constexpr, SCALE: tl.constexpr,
-           BM: tl.constexpr, BK: tl.constexpr):
+def _route_logits(X, Router, Logits, rows, H: tl.constexpr, E: tl.constexpr, BM: tl.constexpr, BE: tl.constexpr, BK: tl.constexpr):
+    r = (tl.program_id(0) * BM + tl.arange(0, BM)).to(tl.int64)
+    valid = r < rows
+    experts = tl.program_id(1) * BE + tl.arange(0, BE)
+    logits = _route_sums(X, Router, r, valid, experts, H, BM, BE, BK)
+    tl.store(Logits + r[:, None] * E + experts[None, :], logits, valid[:, None])
+
+
+@triton.jit(do_not_specialize=['rows'])
+def _route(X, Router, Logits, Bias, Ids, Weights, rows, H: tl.constexpr, E: tl.constexpr, TOPK: tl.constexpr, SCALE: tl.constexpr,
+           BM: tl.constexpr, BK: tl.constexpr, SUMMED: tl.constexpr):
     r = (tl.program_id(0) * BM + tl.arange(0, BM)).to(tl.int64)
     valid = r < rows
     experts = tl.arange(0, E)
-    cols = tl.arange(0, BK)
-    logits = tl.zeros((BM, E), tl.float32)
-    for k in range(0, H, BK):  # BF16 operands: each product exact, as in an FP32 product of the same values
-        x = tl.load(X + r[:, None] * H + k + cols[None, :], valid[:, None], other=0.0)
-        logits = tl.dot(x, tl.load(Router + experts[None, :] * H + k + cols[:, None]), logits)
+    if SUMMED:  # `_route_logits`' sums
+        logits = tl.load(Logits + r[:, None] * E + experts[None, :], valid[:, None], other=0.0)
+    else:
+        logits = _route_sums(X, Router, r, valid, experts, H, BM, E, BK)
     scores = tl.div_rn(1.0, 1.0 + libdevice.exp(-logits))  # torch.sigmoid's arithmetic
     biased = scores + tl.load(Bias + experts)[None, :]
     left = biased
@@ -181,6 +201,9 @@ def _route(X, Router, Bias, Ids, Weights, rows, H: tl.constexpr, E: tl.constexpr
         tl.store(Weights + r * TOPK + j, tl.div_rn(weight, total + 1e-20) * SCALE, valid)
 
 
+SPLIT_ROUTE_ROWS = 512  # calls up to this many rows route in two launches (`route`)
+
+
 def route(x: torch.Tensor, router: torch.Tensor, bias: torch.Tensor, topk: int, scale: float) -> tuple[torch.Tensor, torch.Tensor]:
     """A wide call's routing in one launch: x [T, H] and router [E, H] BF16, bias [E] FP32 -> (ids int64 [T, topk],
     by expert; weights FP32 [T, topk] = scale x score / sum of the chosen scores), the top experts by sigmoid score
@@ -189,10 +212,17 @@ def route(x: torch.Tensor, router: torch.Tensor, bias: torch.Tensor, topk: int, 
     experts = router.shape[0]
     ids = torch.empty((t, topk), dtype=torch.int64, device=x.device)
     weights = torch.empty((t, topk), dtype=torch.float32, device=x.device)
-    if t:
+    if t > SPLIT_ROUTE_ROWS:
         # 32 rows a program: 50 us for 1,678 tokens (16: 73, 64: 61), where PyTorch's chain took 180
-        _route[(triton.cdiv(t, 32),)](x, router, bias, ids, weights, t, H=h, E=experts, TOPK=topk, SCALE=scale, BM=32, BK=64, num_warps=4,
-                                      enable_fp_fusion=False)
+        _route[(triton.cdiv(t, 32),)](x, router, None, bias, ids, weights, t, H=h, E=experts, TOPK=topk, SCALE=scale, BM=32, BK=64,
+                                      SUMMED=False, num_warps=4, enable_fp_fusion=False)
+    elif t:
+        # verification-sized calls: a program a row block's sums would stream the whole router alone (128 rows: 44 us);
+        # the sums spread over expert blocks first, the same sums in the same order, then the choice (14 + 7 us)
+        logits = torch.empty((t, experts), dtype=torch.float32, device=x.device)
+        _route_logits[(triton.cdiv(t, 32), experts // 16)](x, router, logits, t, H=h, E=experts, BM=32, BE=16, BK=64, num_warps=4)
+        _route[(triton.cdiv(t, 16),)](x, router, logits, bias, ids, weights, t, H=h, E=experts, TOPK=topk, SCALE=scale, BM=16, BK=64,
+                                      SUMMED=True, num_warps=4, enable_fp_fusion=False)
     return ids, weights
 
 
@@ -949,4 +979,27 @@ def attention(q: torch.Tensor, rel: torch.Tensor, pq: torch.Tensor, gate_at: int
             q, k, v, rel, pq, index, out, tokens, index.shape[0], q_start, k_start, scale, STRIDE=pq.shape[1], GATE=gate_at, SINK=sink_at,
             H=heads, G=group, D=dim, E=rel.shape[2], WINDOW=window or 0, FP8=fp8,
             BLOCK_M=block_m, BLOCK_N=block_n, num_warps=8 if block_m >= 128 else 4, num_stages=stages)
+    return out
+
+
+@triton.jit
+def _softcap(X, Y, stride, N: tl.constexpr, INV: tl.constexpr, CAP: tl.constexpr, BLOCK: tl.constexpr):
+    row = tl.program_id(1).to(tl.int64)
+    cols = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    live = cols < N
+    x = tl.load(X + row * stride + cols, live, other=0.0).to(tl.float32) * INV
+    # libdevice's tanh flushes subnormal inputs to zero here; PyTorch's returns them, as tanh(x) = x there
+    tl.store(Y + row * N + cols, tl.where(tl.abs(x) < 1.1754943508222875e-38, x, libdevice.tanh(x)) * CAP, live)
+
+
+def softcap(logits: torch.Tensor, n: int, cap: float) -> torch.Tensor:
+    """The head's BF16 logits [R, >= n] -> FP32 [R, n] = cap tanh(logits[:, :n] / cap), in one pass: the bits of
+    `torch.tanh(logits[:, :n].float() / cap) * cap` (PyTorch divides by a scalar as a product with its FP32
+    reciprocal), which took four passes over FP32 rows (128 rows: 3.41 -> 0.66 ms a verify round)."""
+    rows = logits.shape[0]
+    out = torch.empty((rows, n), dtype=torch.float32, device=logits.device)
+    if rows:
+        inv = float(torch.tensor(1.0, dtype=torch.float32) / torch.tensor(cap, dtype=torch.float32))
+        _softcap[(triton.cdiv(n, 4096), rows)](logits, out, logits.stride(0), N=n, INV=inv, CAP=cap, BLOCK=4096, num_warps=8,
+                                               enable_fp_fusion=False)
     return out

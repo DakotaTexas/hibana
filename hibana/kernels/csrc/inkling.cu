@@ -1127,8 +1127,12 @@ torch::Tensor attention(torch::Tensor q, torch::Tensor rel, torch::Tensor proj, 
   auto partial = torch::empty({static_cast<int64_t>(rows) * heads * splits, kPartial}, q.options().dtype(torch::kFloat32));
   auto out = torch::empty_like(q);
   // a block's rows: the largest divisor of `steps` the kernel holds (BF16 K/V stage twice the bytes, so eight rows'
-  // queries and weights would pass the 48 KB of static shared memory)
-  const int most = fp8 ? 8 : 4;
+  // queries and weights would pass the 48 KB of static shared memory). A sliding-window layer's eight-row
+  // verification takes two blocks of four: an eight-row block needs 168 registers a thread, one block a
+  // multiprocessor, where four-row blocks run two (16 sequences of 8 rows: 181 -> 136 us a visit); its at most
+  // 1,024 keys a sequence come twice from L2. A full-attention layer keeps eight rows to a block, so long contexts
+  // read their keys once.
+  const int most = fp8 ? (window > 0 ? 4 : 8) : 4;
   int group = 1;
   for (int d = 1; d <= most; ++d) {
     if (steps % d == 0) {

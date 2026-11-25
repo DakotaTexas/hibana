@@ -357,8 +357,7 @@ class Inkling:
 
     @torch.inference_mode()
     def logits(self, hidden: torch.Tensor) -> torch.Tensor:
-        logits = self.head_logits(hidden)
-        return torch.tanh(logits / c.LOGIT_SOFTCAP) * c.LOGIT_SOFTCAP
+        return prefill.softcap(project(self.lm_head, hidden), self.target.vocab_size, c.LOGIT_SOFTCAP)
 
     @torch.inference_mode()
     def head_logits(self, hidden: torch.Tensor) -> torch.Tensor:
