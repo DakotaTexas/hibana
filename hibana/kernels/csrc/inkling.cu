@@ -874,8 +874,9 @@ __global__ void __launch_bounds__(kPrepThreads) prep_kernel(
 // grid (ceil(rows / R), experts / 4), 128 threads: warp w scores expert 4 blockIdx.y + w on the block's R rows,
 // sigmoid(router x). The last block of a row group to finish (`done`, which it resets) picks each row's `topk`
 // largest scores + bias: ids int64 [rows, topk], weights = scale * score / their sum. router [E, H] BF16, H = 256 V.
-// Cold, against a scoring and a selection kernel: one row 8.9 -> 7.3 us, 16 rows 20.5 -> 11.3.
-template <int V, int R>
+// Cold, against a scoring and a selection kernel: one row 8.9 -> 7.3 us, 16 rows 20.5 -> 11.3. With kLogits it writes
+// the router logits router x (FP32, the sum before the sigmoid) to `scores` and stops: expert sharing's input.
+template <int V, int R, bool kLogits = false>
 __global__ void __launch_bounds__(128) route_kernel(const uint16_t* __restrict__ x, const uint16_t* __restrict__ router,
                                                     const float* __restrict__ bias, float* __restrict__ scores, int* __restrict__ done,
                                                     int64_t* __restrict__ ids, float* __restrict__ weights, int rows, int experts,
@@ -912,9 +913,12 @@ __global__ void __launch_bounds__(128) route_kernel(const uint16_t* __restrict__
         v += __shfl_xor_sync(0xffffffffu, v, off);
       }
       if (lane == 0) {
-        scores[static_cast<int64_t>(row) * experts + e] = 1.f / (1.f + expf(-v));
+        scores[static_cast<int64_t>(row) * experts + e] = kLogits ? v : 1.f / (1.f + expf(-v));
       }
     }
+  }
+  if constexpr (kLogits) {
+    return;
   }
   __shared__ int last;
   __threadfence();
@@ -1394,6 +1398,26 @@ std::vector<torch::Tensor> route(torch::Tensor x, torch::Tensor router, torch::T
   return {ids, weights};
 }
 
+// x [R <= 16, H] and router [E, H] BF16 -> the router logits FP32 [R, E], x router^T summed as `route` sums them.
+torch::Tensor route_logits(torch::Tensor x, torch::Tensor router) {
+  const int rows = x.size(0), hidden = x.size(1), experts = router.size(0);
+  check(rows <= 16, "route_logits takes at most 16 rows");
+  check(x.is_cuda() && x.is_contiguous() && x.scalar_type() == torch::kBFloat16, "x must be contiguous BF16");
+  check(router.scalar_type() == torch::kBFloat16 && router.is_contiguous() && router.size(1) == hidden && experts % 4 == 0 && hidden == 2304,
+        "unexpected router shapes");
+  check(reinterpret_cast<uintptr_t>(x.data_ptr()) % 16 == 0 && reinterpret_cast<uintptr_t>(router.data_ptr()) % 16 == 0, "x and router must be 16-byte aligned");
+  auto logits = torch::empty({rows, experts}, x.options().dtype(torch::kFloat32));
+  if (rows > 0) {
+    auto stream = c10::cuda::getCurrentCUDAStream();
+    const auto* xp = reinterpret_cast<const uint16_t*>(x.data_ptr());
+    const auto* rp = reinterpret_cast<const uint16_t*>(router.data_ptr());
+    route_kernel<9, 1, true><<<dim3(rows, experts / 4), 128, 0, stream>>>(xp, rp, nullptr, logits.data_ptr<float>(), nullptr, nullptr, nullptr,
+                                                                          rows, experts, 0, 0.f);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+  }
+  return logits;
+}
+
 // x [M, K] or [S, M, K] BF16 and w [N, K] BF16, or E4M3 with `scales` (FP32, one a segment), M <= 4 -> [M, N] BF16:
 // x w^T, w's rows from `first` and from `second` (N for none) the second and third segments, which read x's second
 // and third sets when x has them. Launched with programmatic dependent launch (see `grid_wait`).
@@ -1494,6 +1518,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("conv", &conv);
   m.def("prep", &prep);
   m.def("route", &route);
+  m.def("route_logits", &route_logits);
   m.def("gemv", &gemv);
   m.def("rms", &rms);
   m.def("combine", &combine);

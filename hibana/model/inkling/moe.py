@@ -21,6 +21,9 @@ from hibana.kernels import inkling_prefill as prefill
 from hibana.model.inkling import config as c
 
 
+LOGIT_GEMM_ROWS = 8  # sharing's router logits from this many rows on a cuBLAS product (2-7 rows: a slower split-K one)
+
+
 def expert_names(prefix: str, name: str) -> list[str]:
     return [f"{prefix}.experts.{name}_weight{kind}" for kind in ("", "_scale", "_amax", "_outer_scale_denominator")]
 
@@ -60,9 +63,17 @@ class Moe:
 
     def share(self, x: torch.Tensor, slots: torch.Tensor, steps: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Budgeted routing of a decode or verification call: rows request-major, `steps` a request, request q real
-        iff slots[q] != 0 (a graph's padding sits on the dummy slot 0)."""
+        iff slots[q] != 0 (a graph's padding sits on the dummy slot 0). The FP32 logits of the BF16 operands: the
+        decode route kernel's sums under `LOGIT_GEMM_ROWS` rows (2-4 us where the FP32 product took 7-14), a cuBLAS
+        BF16 product with FP32 accumulation from there (4-5 us at 64-128 rows against 13-18), which sums in another
+        order than the plain routes."""
         from hibana.model.nemotron.moe import route_budget
-        ids, weights, _ = route_budget(x.float() @ self.router16.float().T, self.bias, c.EXPERTS_PER_TOKEN, 0, self.keep,
+        x = x.contiguous()
+        if x.shape[0] < LOGIT_GEMM_ROWS:
+            logits = kernels.route_logits(x, self.router16)
+        else:
+            logits = torch.mm(x, self.router16.T, out_dtype=torch.float32)
+        ids, weights, _ = route_budget(logits, self.bias, c.EXPERTS_PER_TOKEN, 0, self.keep,
                                        self.budget, slots, steps, per_request=self.per_request, scale=c.ROUTE_SCALE,
                                        id_dtype=torch.int64)
         return ids, weights

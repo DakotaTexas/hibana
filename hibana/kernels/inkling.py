@@ -92,6 +92,12 @@ def route(x: torch.Tensor, router: torch.Tensor, bias: torch.Tensor, topk: int, 
     return _module().route(x, router, bias, done, topk, scale)
 
 
+def route_logits(x: torch.Tensor, router: torch.Tensor) -> torch.Tensor:
+    """x [R <= 16, H] and router [E, H] BF16 -> FP32 [R, E], x @ router.T accumulated in FP32 in `route`'s order: the logits
+    whose sigmoid `route` ranks, for routings that rank them themselves (expert sharing's `route_budget`)."""
+    return _module().route_logits(x, router)
+
+
 def gemv(x: torch.Tensor, weight: torch.Tensor, first: int | None = None, second: int | None = None,
          scales: torch.Tensor | None = None) -> torch.Tensor:
     """x [M, K] BF16 (M <= GEMV_ROWS) and a matrix [N, K] -> x @ weight.T, BF16 [M, N], accumulated in FP32. The matrix
