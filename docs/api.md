@@ -59,7 +59,7 @@ prompt tokens reused from the prefix cache as
 cached tokens and speculative work when used. `/generate` and OpenAI routes
 have different response schemas.
 
-Queue saturation returns 429. An unavailable engine returns 503; a stream
+Queue saturation returns 429 (`HIBANA_MAX_QUEUED` raises the queue limit above the profile default of at least two batches). An unavailable engine returns 503; a stream
 already in progress reports an SSE error. Client disconnects cancel their
 requests. Cache flush acknowledges invalidation; locked storage may remain
 until its readers finish, reported by `flush_pending`.

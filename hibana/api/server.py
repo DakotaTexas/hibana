@@ -795,6 +795,11 @@ def _persist_prefixes(ex, engine, log) -> None:
         ex.persist_prefixes(log)
 
 
+def _queue_depth(profile_max_queued: int, max_batch: int, configured: int = 0) -> int:
+    """Queue depth before HTTP 429: at least the profile default, two full batches, and HIBANA_MAX_QUEUED."""
+    return max(profile_max_queued, 2 * max_batch, configured)
+
+
 def serve(host: str, port: int, log=print, spec: int = 0, proposer: str = "mtp", state_strategy: str = "snapshots", draft_precision: str = 'bf16',
           traces: str | None = None, traces_max_mib: int = 32768, draft_dir: str | None = None,
           accept_default: tuple[int, float] = (1, 0.0), target: str | None = None, max_context: int | None = None,
@@ -836,8 +841,9 @@ def serve(host: str, port: int, log=print, spec: int = 0, proposer: str = "mtp",
     ex.capture_graphs(log=log)
     ex.warmup(log=log)
     ex.enable_ssd_tier(log=log)
-    # a burst as wide as the batch must queue, not be refused: the queue holds at least two batches
-    cfg = SchedulerConfig(max_running=ex.profile.max_batch, max_queued=max(ex.profile.max_queued, 2 * ex.profile.max_batch),
+    # a burst as wide as the batch must queue, not be refused: the queue holds at least two batches, or HIBANA_MAX_QUEUED
+    cfg = SchedulerConfig(max_running=ex.profile.max_batch,
+                          max_queued=_queue_depth(ex.profile.max_queued, ex.profile.max_batch, current().max_queued),
                           chunk_size=ex.profile.chunk_size, prefill_budget=ex.profile.prefill_budget,
                           solo_chunk_size=ex.profile.solo_chunk_size)
     sched = Scheduler(ex, cfg)

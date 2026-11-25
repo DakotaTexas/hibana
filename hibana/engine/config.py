@@ -126,6 +126,8 @@ class EngineConfig:
     ssd: bool = False                         # HIBANA_SSD
     ssd_gib: float = 200.0                    # HIBANA_SSD_GIB: its capacity
     ssd_dir: str = SSD_DIR                    # HIBANA_SSD_DIR: where it stores
+    # --- HTTP API defaults
+    max_queued: int = 0                       # HIBANA_MAX_QUEUED: queue depth before HTTP 429 (0: profile default, at least two batches)
     # the SSD tier's tuning
     ssd_block_tokens: int = 256               # HIBANA_SSD_BLOCK_TOKENS: tokens per SSD KV block (divides the 2048-token prefill chunk)
     ssd_trace: bool = False                   # HIBANA_SSD_TRACE: one line per restore in <ssd dir>/v2/restores.jsonl
@@ -158,6 +160,8 @@ class EngineConfig:
         for name, v in (("HIBANA_MOE_KEEP", self.moe_keep), ("HIBANA_MOE_BUDGET", self.moe_budget)):
             if v < 0:
                 raise ValueError(f"{name}={v}: a count of experts, or 0 (off)")
+        if self.max_queued < 0:
+            raise ValueError(f"HIBANA_MAX_QUEUED={self.max_queued}: must be a non-negative integer")
 
     @property
     def ssd_buffers(self) -> dict[str, int]:
@@ -209,6 +213,7 @@ class EngineConfig:
             ssd=_flag(e, "HIBANA_SSD"),
             ssd_gib=float(e.get("HIBANA_SSD_GIB") or "200"),
             ssd_dir=_str(e, "HIBANA_SSD_DIR", SSD_DIR),
+            max_queued=_int(e, "HIBANA_MAX_QUEUED", 0),
             ssd_block_tokens=_ssd_block(_int(e, "HIBANA_SSD_BLOCK_TOKENS", 256)),
             ssd_trace=_flag(e, "HIBANA_SSD_TRACE"),
             ssd_writers=_positive(e, "HIBANA_SSD_WRITERS", 4),
