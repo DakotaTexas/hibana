@@ -121,6 +121,7 @@ class EngineConfig:
     mtp_sample: bool = False                  # HIBANA_MTP_SAMPLE: sampled requests draft from the MTP head's law on its rescored candidates instead of its argmax, verified against that law
     accept_default: str = "off"               # HIBANA_ACCEPT_DEFAULT: K:M for greedy requests that set neither field (off: exact)
     accept_soft: float = 0.0                  # HIBANA_ACCEPT_SOFT: accept_soft s for sampled requests that do not set it (0: exact)
+    accept_soft_gate: str = "off"             # HIBANA_ACCEPT_SOFT_GATE: K:M gate on accept_soft for sampled requests that set neither field (off: every draft)
     qsa_sparse_graphs: bool = True            # HIBANA_QSA_SPARSE_GRAPHS=0: rows past the indexer budget run eagerly
     qsa_prefill_backend: str = "original"    # HIBANA_QSA_PREFILL_BACKEND: original, auto, optimized (SM121 TP1/TP2, <=32K)
     ple_resident: str = "auto"                 # HIBANA_PLE_RESIDENT: Flash-Next's PLE table in device memory, each tensor-parallel rank its share of the heads; auto: on two Sparks, 0: off
@@ -206,6 +207,7 @@ class EngineConfig:
             mtp_sample=_flag(e, "HIBANA_MTP_SAMPLE"),
             accept_default=e.get("HIBANA_ACCEPT_DEFAULT", "off"),
             accept_soft=_accept_soft(e),
+            accept_soft_gate=e.get("HIBANA_ACCEPT_SOFT_GATE", "off"),
             qsa_sparse_graphs=e.get("HIBANA_QSA_SPARSE_GRAPHS", "1") != "0",
             qsa_prefill_backend=_str(e, "HIBANA_QSA_PREFILL_BACKEND", "original"),
             ple_resident=e.get("HIBANA_PLE_RESIDENT", "auto"),

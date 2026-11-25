@@ -428,6 +428,8 @@ class Settings:
                 "--accept-default", self.get("HIBANA_ACCEPT_DEFAULT", "off")]
         if self.get("HIBANA_ACCEPT_SOFT"):
             args += ["--accept-soft", self.get("HIBANA_ACCEPT_SOFT")]
+        if self.get("HIBANA_ACCEPT_SOFT_GATE"):
+            args += ["--accept-soft-gate", self.get("HIBANA_ACCEPT_SOFT_GATE")]
         if self.get("HIBANA_SPEC_DEPTHS") and self.spec:
             args += ["--spec-depths", self.get("HIBANA_SPEC_DEPTHS")]
         if self.draft_dir is not None:
@@ -437,6 +439,16 @@ class Settings:
         if tp > 1:
             args += ["--tp", str(tp)]
         return args
+
+
+def _gate_text(text: str) -> bool:
+    if text.strip().lower() in ("", "off"):
+        return True
+    try:
+        k, m = text.split(":")
+        return int(k) >= 1 and math.isfinite(float(m)) and float(m) >= 0
+    except ValueError:
+        return False
 
 
 def _finite_nonnegative(text: str) -> bool:
@@ -499,6 +511,7 @@ def resolve(target: str | None = None, profile: str | None = None, overrides: di
     for key in ("HIBANA_W3_DECODE", "HIBANA_DEVICE_ACCEPT", "HIBANA_MTP_SAMPLE"):
         _check(values.get(key, "0") in ("0", "1"), f"{key} must be 0 or 1")
     _check(_finite_nonnegative(values.get("HIBANA_ACCEPT_SOFT", "0")), "HIBANA_ACCEPT_SOFT must be a finite number >= 0 (0: exact)")
+    _check(_gate_text(values.get("HIBANA_ACCEPT_SOFT_GATE", "off")), "HIBANA_ACCEPT_SOFT_GATE must be K:M (top K >= 1 within M >= 0 nats) or off")
     batch = values.get("HIBANA_MAX_BATCH", "4")
     _check(batch.isdigit() and 1 <= int(batch) <= 128, "HIBANA_MAX_BATCH must be in [1, 128]")
     depths = values.get("HIBANA_SPEC_DEPTHS", "")

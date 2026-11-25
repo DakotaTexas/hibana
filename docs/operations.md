@@ -203,6 +203,7 @@ the config file wins. `/get_server_info` reports the profile under `config`.
 |---|---|---|---|
 | Relaxed acceptance, greedy requests (`HIBANA_ACCEPT_DEFAULT`) | off | top-3 within 2.0 logits; Flash-Next DFlash2 top-2 within 1.0; Bolt off | as fast |
 | Relaxed acceptance, sampled requests (`HIBANA_ACCEPT_SOFT`, `accept_soft` in the [API](api.md)) | 0 (exact) | Flash-Next and Nemotron s = 0.5; Inkling 0.25; the 27B and Bolt 0 (exact) | as fast |
+| Gate on sampled relaxed acceptance (`HIBANA_ACCEPT_SOFT_GATE`, K:M: e^s only for drafts in the target's top K within M nats of its top token) | off | off (every draft) | as fast |
 | Sampled MTP drafts (`HIBANA_MTP_SAMPLE`, [below](#sampled-mtp-drafts)) | off | on where MTP drafts | as fast |
 | Calibrated 3-bit decode copies (`HIBANA_W3_DECODE`; on Flash-Next and Nemotron also the routed experts; Bolt's trunk and vocabulary head) | off | on | on |
 | Device-resident acceptance (`HIBANA_DEVICE_ACCEPT`) | off | Flash-Next and Nemotron | as fast |
@@ -216,7 +217,9 @@ Relaxed acceptance for greedy requests accepts a drafted token the target ranks 
 margin of its argmax, so outputs are no longer the target's exact greedy continuation; a request can pin exact
 acceptance with `accept_top_k: 1` ([API](api.md)). Sampled requests have one rule, s: a drafted token y is also
 accepted when u · q(y) < e^s · p(y), so no token comes out more than e^s times as often as the target's law gives
-it; `accept_soft: 0` pins exact sampling. Sampled with thinking on at 4 requests on one Spark, s = 0.5 decodes
+it; `accept_soft: 0` pins exact sampling. `HIBANA_ACCEPT_SOFT_GATE=K:M` (off in every profile) limits e^s to drafts
+the target ranks within its top K and within M nats of its top token; a draft outside takes the exact test, so it
+never comes out more often than the target gives it. Sampled with thinking on at 4 requests on one Spark, s = 0.5 decodes
 Flash-Next with MTP at 216 tok/s against 183 exact, and the 27B with DFlash2 at 195 against 165. On GPQA-D with thinking
 at a 64K cap (Flash-Next, 99 items, paired) s = 0.5 scored 81.8% against 84.8% exact (p 0.51) with answers 18% longer,
 so on long reasoning the faster decode buys little: `fast` sets s = 0.5 on Flash-Next and keeps the 27B exact.

@@ -38,6 +38,7 @@ import torch
 
 from hibana.engine import graph_set
 from hibana.engine.accept import MAX_STOPS, accept_block
+from hibana.engine.rejection import gate_slots
 
 def enabled() -> bool:
     """HIBANA_DEVICE_ACCEPT."""
@@ -207,7 +208,8 @@ class AcceptGraphs:
                 p = r.params
                 hp[i, 0], hp[i, 1], hp[i, 2] = max(p.temperature, 1e-6), float(p.top_k), p.top_p
                 if p.relaxed:
-                    hp[i, 3], hp[i, 5] = 1.0, p.soft_scale
+                    hp[i, 3] = 1.0
+                    hp[i, 4], hp[i, 5], hp[i, 6], hp[i, 7] = gate_slots(p)
                 hr[i, 0], hr[i, 1] = r.rng_seed, o
             st["params"].copy_(hp, non_blocking=True)
             st["rng"].copy_(hr, non_blocking=True)

@@ -6,7 +6,7 @@ from collections import Counter
 import pytest
 import torch
 
-from hibana.engine.rejection import distribution, small_laws, verify_rows
+from hibana.engine.rejection import distribution, gate_slots, small_laws, verify_rows
 from hibana.engine.sampler import SamplingParams
 
 DEV = torch.device("cuda")
@@ -51,12 +51,14 @@ def test_sampled_lattice_law_and_draws():
     assert not close(ref, got)
 
 
-@pytest.mark.parametrize("relaxed,has_q", [(False, False), (True, False), (False, True), (True, True)])
-def test_verify_candidates_is_distributed_as_verify_rows(relaxed, has_q):
+@pytest.mark.parametrize("relaxed,has_q,gate", [(False, False, None), (True, False, None), (False, True, None), (True, True, None),
+                                                (True, False, (3, 2.0)), (True, True, (3, 2.0))])
+def test_verify_candidates_is_distributed_as_verify_rows(relaxed, has_q, gate):
     from hibana.kernels.sampled_verify import verify_candidates
     torch.manual_seed(2)
     k, v, w, n = 3, 300, 6, 8000
-    params = SamplingParams(temperature=1.0, top_k=8, top_p=0.9, accept_soft=0.5 if relaxed else 0.0)
+    params = SamplingParams(temperature=1.0, top_k=8, top_p=0.9, accept_soft=0.5 if relaxed else 0.0,
+                            **({} if gate is None else {"accept_top_k": gate[0], "accept_margin": gate[1]}))
     logits = (torch.randn(1, k + 1, v, device=DEV) * 2).to(torch.bfloat16)
     p = distribution(logits[0], params)
     q = support = None
@@ -70,10 +72,10 @@ def test_verify_candidates_is_distributed_as_verify_rows(relaxed, has_q):
     ref = Counter()
     for seed in range(n):
         a, c, _ = verify_rows(y[0], p, None if q is None else q[0], None if q is None else support[0],
-                              torch.Generator(device=DEV).manual_seed(seed), soft_scale=params.soft_scale)
+                              torch.Generator(device=DEV).manual_seed(seed), soft_scale=params.soft_scale, gate=params.soft_gate)
         ref[(int(a), int(c))] += 1
     values, index = logits.topk(params.top_k + 64, dim=-1)
-    rows = torch.tensor([[1.0, params.top_k, params.top_p, float(relaxed), 0, params.soft_scale, 0, 0]], device=DEV)
+    rows = torch.tensor([[1.0, params.top_k, params.top_p, float(relaxed), *gate_slots(params)]], device=DEV)
     rng = torch.stack([torch.arange(n, device=DEV) * 104729 + 17, torch.full((n,), 32, device=DEV)], 1)
     rep = lambda t: None if t is None else t.expand(n, *t.shape[1:]).contiguous()  # noqa: E731
     a, c, _, fit = verify_candidates(rep(values), rep(index), rep(y), rep(rows), rng, rep(q), rep(support))
@@ -121,3 +123,21 @@ def test_verify_candidates_soft_law(draft):
         assert abs(a.float().mean().item() - acc.sum().item()) < 0.004, (draft, s)
         assert not (flags[:, 0].bool() & (a == 0)).any()  # flags mark accepts only
         assert s > 0 or not flags.any()  # s = 0 boosts nothing
+    # gate 2:1.0 (G = {0, 1}): e^s only on G, the exact test outside it
+    s = 0.5
+    rows = torch.tensor([[1.0, 4, 1.0, 1.0, 2.0, math.exp(-s), 1.0, 0]], device=DEV).expand(n, 8).contiguous()
+    c_on = torch.tensor([math.exp(s), math.exp(s), 1.0, 1.0], device=DEV)
+    for y in ((0, 2) if draft != "dflash2" else (None,)):
+        if y is None:
+            drafts = torch.multinomial(q, n, replacement=True).view(n, 1)
+            qq, support, point = q.expand(n, 1, 4).contiguous(), torch.arange(4, device=DEV).expand(n, 1, 4).contiguous(), q
+        else:
+            drafts, qq, support = torch.full((n, 1), y, device=DEV), None, None
+            point = torch.nn.functional.one_hot(torch.tensor(y, device=DEV), 4).float()
+        a, c, flags, fit = verify_candidates(values, index, drafts, rows, rng, qq, support)
+        got = torch.bincount(torch.where(a > 0, drafts[:, 0], c), minlength=4).float() / n
+        acc = torch.minimum(point, c_on * p)
+        left = (p - point).clamp(min=0)
+        law = acc + (1 - acc.sum()).clamp(min=0) * left / left.sum()
+        assert (got - law).abs().max() < 0.004, (draft, y, got, law)
+        assert (got[2:] <= p[2:] + 0.004).all()  # outside the gate: never more often than the target

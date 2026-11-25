@@ -170,7 +170,8 @@ def summary(s: Settings, host: dict[str, str], w3: Path | None, tp: int = 1) -> 
              f"  GPU: {host.get('gpu', '?')}; memory: {host.get('memory', '?')}",
              f"  speculation: {s.proposer}, {s.spec} drafts, draft {draft}",
              f"  acceptance: greedy {s.get('HIBANA_ACCEPT_DEFAULT')}, sampled "
-             + (f"s={soft}" if float(soft) > 0 else "exact"),
+             + (f"s={soft}" if float(soft) > 0 else "exact")
+             + (f" inside {s.get('HIBANA_ACCEPT_SOFT_GATE')}" if float(soft) > 0 and s.get("HIBANA_ACCEPT_SOFT_GATE", "off").strip().lower() not in ("", "off", "1:0", "1:0.0") else ""),
              f"  3-bit copies: {on(s.engine_env(w3).get('HIBANA_W3_DECODE'))}{f' ({w3})' if w3 else ''}; "
              f"device-resident acceptance: {on(s.get('HIBANA_DEVICE_ACCEPT'))}",
              f"  context {s.max_context} tokens, up to {s.get('HIBANA_MAX_BATCH')} requests"

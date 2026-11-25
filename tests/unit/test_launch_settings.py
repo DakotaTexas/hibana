@@ -98,6 +98,12 @@ def test_accept_soft_must_be_finite_and_nonnegative(env, value):
         resolve({**env, "HIBANA_ACCEPT_SOFT": value}, "27b", "fast")
 
 
+@pytest.mark.parametrize("value", ["3", "0:2.0", "3:-1", "3:inf", "a:b"])
+def test_accept_soft_gate_must_be_k_m_or_off(env, value):
+    with pytest.raises(ValueError, match="HIBANA_ACCEPT_SOFT_GATE"):
+        resolve({**env, "HIBANA_ACCEPT_SOFT_GATE": value}, "27b", "fast")
+
+
 @pytest.mark.parametrize("profile, target, w3", [
     ("exact", "qwen38", "0"), ("exact", "flashnext", "0"),
     ("fast", "qwen38", "1"), ("fast", "flashnext", "1"), ("throughput", "qwen38", "1"), ("throughput", "flashnext", "1")])
@@ -199,7 +205,9 @@ def test_the_engine_gets_explicit_flags_and_its_environment(env, tmp_path):
     assert "--draft" not in args and args[args.index("--traces") + 1] == str(s.traces)
     assert not any("sampled" in a for a in args)
     soft = resolve({**env, "HIBANA_DRAFT": "pinned", "HIBANA_ACCEPT_SOFT": "0.25"}, "27b", "fast").engine_args()
-    assert soft[soft.index("--accept-soft") + 1] == "0.25"
+    assert soft[soft.index("--accept-soft") + 1] == "0.25" and "--accept-soft-gate" not in soft
+    gated = resolve({**env, "HIBANA_DRAFT": "pinned", "HIBANA_ACCEPT_SOFT": "0.5", "HIBANA_ACCEPT_SOFT_GATE": "3:2.0"}, "27b", "fast").engine_args()
+    assert gated[gated.index("--accept-soft-gate") + 1] == "3:2.0"
     e = s.engine_env(tmp_path / "w3")
     assert e["HIBANA_W3_CHECKPOINT"] == str(tmp_path / "w3") and e["HIBANA_SSD_DIR"] == str(s.ssd)
     assert "HIBANA_DRAFT" not in e and "HIBANA_TRACES" not in e  # the flags carry them

@@ -811,13 +811,13 @@ def _persist_prefixes(ex, engine, log) -> None:
 def serve(host: str, port: int, log=print, spec: int = 0, proposer: str = "mtp", state_strategy: str = "snapshots", draft_precision: str = 'bf16',
           traces: str | None = None, traces_max_mib: int = 32768, draft_dir: str | None = None,
           accept_default: tuple[int, float] = (1, 0.0), target: str | None = None, max_context: int | None = None,
-          max_batch: int = 4, accept_soft: float = 0.0) -> None:
+          max_batch: int = 4, accept_soft: float = 0.0, accept_soft_gate: tuple[int, float] = (1, 0.0)) -> None:
     from hibana.cache.spec_budget import SpecConfig
     from hibana.api.validation import set_accept_default
 
     if (accept_default != (1, 0.0) or accept_soft) and not spec:
         raise ValueError('a relaxed acceptance default requires speculation')
-    set_accept_default(*accept_default, soft=accept_soft)
+    set_accept_default(*accept_default, soft=accept_soft, soft_gate=accept_soft_gate)
 
     if not spec and draft_precision != 'bf16':
         raise ValueError('draft precision requires speculation')
@@ -896,7 +896,10 @@ def serve(host: str, port: int, log=print, spec: int = 0, proposer: str = "mtp",
                         "draft_precision": draft_precision, "draft": getattr(ex.spec.proposer.model, "source", None)
                         if hasattr(ex.spec.proposer, "model") else None,
                         "accept_default": {"accept_top_k": accept_default[0], "accept_margin": accept_default[1],
-                                           "accept_soft": accept_soft}} if spec else None,
+                                           "accept_soft": accept_soft,
+                                           "accept_soft_gate": None if accept_soft_gate == (1, 0.0) else
+                                           {"accept_top_k": accept_soft_gate[0], "accept_margin": accept_soft_gate[1]}}}
+        if spec else None,
         "attention_backend": "flashinfer",
         # the chunked GDN prefill (kernels/gdn_prefill.backend): CuTe on SM12x for the FP32 state, else Triton
         "gdn_backend": current().gdn_prefill if current().gdn_prefill != "auto" else

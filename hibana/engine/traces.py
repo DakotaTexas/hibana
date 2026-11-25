@@ -56,6 +56,8 @@ def _record(req) -> dict:
     }
     if params.accept_soft > 0:  # a sampled request's relaxed rule; absent: exact
         doc["params"]["accept_soft"] = params.accept_soft
+        if params.soft_gate is not None:
+            doc["params"]["accept_soft_gate"] = list(params.soft_gate)
     rounds = req.trace_rounds
     if rounds:
         doc["spec"] = {"k": len(rounds[0]["y"]), "rounds": list(rounds)}

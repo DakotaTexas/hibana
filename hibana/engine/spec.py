@@ -653,7 +653,7 @@ class SpecDecoder:
                     p = distribution(z[i], req.params)
                     a_t, c_t, rx_t = verify_rows(y[i], p, proposal.probabilities[i] if proposal.probabilities is not None else None,
                                                  proposal.support[i] if proposal.support is not None else None, req.generator,
-                                                 soft_scale=req.params.soft_scale)
+                                                 soft_scale=req.params.soft_scale, gate=req.params.soft_gate)
                     acc_rows.append(a_t)
                     corr_rows.append(c_t)
                     flag_rows.append(rx_t.to(torch.int64))

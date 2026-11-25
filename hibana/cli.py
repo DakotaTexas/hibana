@@ -48,6 +48,9 @@ def add_engine_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--spec-depths", default=None, help="verify depth per batch bucket as BUCKET:DEPTH pairs, e.g. 8:1,16:0 (0: plain decode; default: HIBANA_SPEC_DEPTHS, else --spec everywhere)")
     p.add_argument("--accept-default", default=None, help="relaxed acceptance for greedy requests without accept_top_k/accept_margin, as K:M "
                    "(default: HIBANA_ACCEPT_DEFAULT, else the profile's); 'off' keeps every request exact")
+    p.add_argument("--accept-soft-gate", default=None, help="the gate on --accept-soft for sampled requests without accept_top_k/accept_margin, "
+                   "as K:M: only a draft the target ranks within its top K and within M nats of its top token gets e^s "
+                   "(default: HIBANA_ACCEPT_SOFT_GATE, else off: every draft)")
     p.add_argument("--accept-soft", type=float, default=None, help="relaxed acceptance for sampled requests without accept_soft, as s: no token comes out more than "
                    "e^s times as often as the target gives it (default: HIBANA_ACCEPT_SOFT, else 0, exact)")
     p.add_argument("--tp", type=int, default=1, help="tensor-parallel ranks, one GPU (Spark) each; rank 0 serves HTTP")
@@ -111,16 +114,17 @@ def run_engine(args, parser) -> int:
     max_mib = args.traces_max_mib if args.traces_max_mib is not None else cfg.traces_max_mib
     if max_mib < 1:
         parser.error("--traces-max-mib must be a positive integer")
-    from hibana.api.validation import parse_accept_default
+    from hibana.api.validation import parse_accept_default, parse_soft_gate
     try:
         accept_default = parse_accept_default(args.accept_default if args.accept_default is not None else cfg.accept_default)
+        soft_gate = parse_soft_gate(args.accept_soft_gate if args.accept_soft_gate is not None else cfg.accept_soft_gate)
     except ValueError as exc:
         parser.error(str(exc))
     accept_soft = args.accept_soft if args.accept_soft is not None else cfg.accept_soft
     if not math.isfinite(accept_soft) or accept_soft < 0:
         parser.error("--accept-soft must be a finite number >= 0")
     if not args.spec:
-        accept_default, accept_soft = (1, 0.0), 0.0  # no speculation, nothing to relax
+        accept_default, accept_soft, soft_gate = (1, 0.0), 0.0, (1, 0.0)  # no speculation, nothing to relax
     max_context = args.context_length if args.context_length is not None else cfg.max_context
     from hibana.engine.profile import MAX_CONTEXT
     if max_context is not None and not 2 <= max_context <= MAX_CONTEXT:
@@ -145,12 +149,12 @@ def run_engine(args, parser) -> int:
     engine_config.install(cfg.replace(spec=str(args.spec), proposer=args.proposer, traces=traces, traces_max_mib=max_mib, draft_dir=draft_dir,
                                       target=target, max_context=max_context, accept_default=f"{accept_default[0]}:{accept_default[1]}",
                                       max_batch=max_batch, spec_depths=spec_depths if args.spec else None,
-                                      accept_soft=accept_soft))
+                                      accept_soft=accept_soft, accept_soft_gate=f"{soft_gate[0]}:{soft_gate[1]}"))
     from hibana.api.server import serve
     serve(args.host, args.port, spec=args.spec, proposer=args.proposer, state_strategy=args.verify_state,
           draft_precision=args.draft_precision, traces=traces, traces_max_mib=max_mib, draft_dir=draft_dir,
           accept_default=accept_default, target=target,
-          max_context=max_context, max_batch=max_batch, accept_soft=accept_soft)
+          max_context=max_context, max_batch=max_batch, accept_soft=accept_soft, accept_soft_gate=soft_gate)
     if args.tp > 1:
         close_distributed()
     return 0
