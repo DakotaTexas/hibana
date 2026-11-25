@@ -414,6 +414,7 @@ def _inkling() -> Target:
         routed_scaling_factor=c.ROUTE_SCALE, stop_token_ids=c.STOP_TOKEN_IDS,
         kv_formats=("fp8", "sim-bf16"),  # sim-bf16: the checkpoint's own unquantized cache
         slot_state_bytes=c.NUM_VISITS * (c.CONV_KERNEL - 1) * c.CONV_WIDTH * 2, chat_format="inkling",
+        draft_pins=tuple((name, *pin) for name, pin in c.DRAFT_PINS.items()),
     )
 
 

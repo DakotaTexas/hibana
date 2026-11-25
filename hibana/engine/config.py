@@ -108,6 +108,7 @@ class EngineConfig:
     vision: bool = False                      # HIBANA_VISION: load the checkpoint's vision encoder for image input (Nemotron Super and Bolt; about 1.7 GiB)
     # --- speculation
     spec: str | None = None                   # HIBANA_SPEC as given ("auto"/unset: the proposer's default depth)
+    proposer: str | None = None               # HIBANA_PROPOSER: mtp | dflash2 | dspark (unset: the target's own drafter)
     spec_depths: str | None = None            # HIBANA_SPEC_DEPTHS: verify depth per batch bucket, "8:1,16:0" (0: plain decode; unset: HIBANA_SPEC everywhere)
     spec_step_cost: float = 0.0               # HIBANA_SPEC_STEP_COST: a drafted token's cost against a depth-1 round, for adaptive depth (engine/depth.py; 0: fixed)
     spec_policy: str = "fixed"                # HIBANA_SPEC_POLICY: fixed | budget (engine/depth.RowBudget: verified drafts from scores and measured costs)
@@ -192,6 +193,7 @@ class EngineConfig:
             bolt_experts=_str(e, "HIBANA_BOLT_EXPERTS", "b12x"),
             vision=_flag(e, "HIBANA_VISION"),
             spec=_str(e, "HIBANA_SPEC"),
+            proposer=_str(e, "HIBANA_PROPOSER"),
             spec_depths=_str(e, "HIBANA_SPEC_DEPTHS"),
             spec_step_cost=float(_str(e, "HIBANA_SPEC_STEP_COST") or 0.0),
             spec_policy=_str(e, "HIBANA_SPEC_POLICY", "fixed"),

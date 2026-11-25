@@ -18,6 +18,9 @@ MODEL_CACHE_KEY = "models--thinkingmachines--Inkling-2-Mini"
 MODEL_ARCHITECTURE = "Inkling2LoopForConditionalGeneration"
 PREFIX = "model.llm"
 
+# Block drafters trained on this checkpoint's features besides its bundled DSpark (`mtp.safetensors`)
+DRAFT_PINS = {"dflash2": ("incoai/Inkling-2-Mini-DFlash2", "4f9088ea66c21f2b99ed657d1941c306b03e84d2")}
+
 STOP_TOKEN_IDS = (200006,)  # <|content_model_end_sampling|> (generation_config.json)
 
 HIDDEN_SIZE = 2304

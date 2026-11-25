@@ -238,7 +238,7 @@ class Inkling:
         # The bundled DSpark drafter, when the server speculates: its context K/V are rows of the KV pool's pages
         # (`register_pages`), so it loads with the model.
         self.draft = None
-        if current().spec not in (None, "", "0"):
+        if current().spec not in (None, "", "0") and current().proposer in (None, "dspark"):
             from hibana.model.inkling.dspark import InklingDraft
             # as long as the engine serves (HIBANA_MAX_CONTEXT), not the target's default: its rotary table and page
             # lists end there
@@ -357,7 +357,10 @@ class Inkling:
 
     @torch.inference_mode()
     def logits(self, hidden: torch.Tensor) -> torch.Tensor:
-        logits = project(self.lm_head, hidden)[:, :self.target.vocab_size].float()
+        logits = self.head_logits(hidden)
         return torch.tanh(logits / c.LOGIT_SOFTCAP) * c.LOGIT_SOFTCAP
 
-    head_logits = logits
+    @torch.inference_mode()
+    def head_logits(self, hidden: torch.Tensor) -> torch.Tensor:
+        """The head's FP32 logits before the softcap: what a DFlash2 selector scores, softcapping after its correction."""
+        return project(self.lm_head, hidden)[:, :self.target.vocab_size].float()

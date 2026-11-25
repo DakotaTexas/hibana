@@ -227,20 +227,21 @@ def test_decode_continues_what_prefill_computes():
         engine_config.install(before)
 
 
-def test_dspark_rounds_emit_what_a_prefill_predicts():
-    """On the pinned checkpoint with its bundled drafter: every token a speculative round emits (accepted drafts and
-    the correction) is the argmax of a stand-alone prefill at its position, up to the model's rounding sensitivity,
-    and the drafter earns its rounds. A verification that misread a draft row's convolution window or K/V, or
-    committed the wrong window, would emit other tokens."""
+@pytest.mark.parametrize("proposer, depth", [("dspark", 3), ("dflash2", 7)])
+def test_draft_rounds_emit_what_a_prefill_predicts(proposer, depth):
+    """On the pinned checkpoint with its bundled DSpark drafter or the pinned DFlash2 draft: every token a speculative
+    round emits (accepted drafts and the correction) is the argmax of a stand-alone prefill at its position, up to the
+    model's rounding sensitivity, and the drafter earns its rounds. A verification that misread a draft row's
+    convolution window or K/V, or committed the wrong window, or a draft fed the wrong taps, would emit other tokens."""
     from hibana.engine import config as engine_config
     from hibana.engine.executor import Executor
     from hibana.engine.sampler import SamplingParams
     before = engine_config.current()
-    engine_config.install(before.replace(spec="7", spec_depths="1:3,2:3"))
+    engine_config.install(before.replace(spec="7", proposer=proposer, spec_depths=f"1:{depth},2:{depth}"))
     try:
         model = load()
         ex = Executor(model, num_pages=8192, num_slots=8, max_batch=2, log=None)
-        ex.enable_spec(7, proposer="dspark", state_strategy="snapshots")
+        ex.enable_spec(7, proposer=proposer, state_strategy="snapshots")
         ex.capture_graphs(log=None)
         prompts = [chat_ids("Write a short story about a lighthouse keeper who finds a message in a bottle."),
                    chat_ids("Write a Python function that merges overlapping intervals, then explain how it handles intervals that only touch.")]
@@ -254,27 +255,30 @@ def test_dspark_rounds_emit_what_a_prefill_predicts():
             full = model.logits(model.prefill(torch.tensor(ids + out, device=DEVICE))["norm"]).argmax(-1).tolist()
             agree = sum(a == b for a, b in zip(out, full[len(ids) - 1:len(ids) - 1 + len(out)])) / len(out)
             assert agree > 0.8, agree
-        for r in reqs:  # the drafter is right more often than not
-            assert r.spec_emitted / r.spec_rounds > 1.3, (r.spec_emitted, r.spec_rounds)
+        for r in reqs:  # the drafter is right more often than not (DFlash2: 3.6 tokens a round at depth 7)
+            assert r.spec_emitted / r.spec_rounds > (2.5 if proposer == "dflash2" else 1.3), (r.spec_emitted, r.spec_rounds)
         for r in reqs:
             ex.release(r)
     finally:
         engine_config.install(before)
 
 
-def test_ssd_resume_matches_a_resume_from_memory(tmp_path):
-    """On the pinned checkpoint with its drafter: a prefix the SSD tier stored and restored gives back what memory held
-    (each visit's K/V, its convolution windows, DSpark's context rows) and resumes at the same point to the same
-    tokens, bit for bit, as a resume from the GPU prefix cache."""
+@pytest.mark.parametrize("proposer", ["dspark", "dflash2"])
+def test_ssd_resume_matches_a_resume_from_memory(tmp_path, proposer):
+    """On the pinned checkpoint with a drafter: a prefix the SSD tier stored and restored gives back what memory held
+    (each visit's K/V, its convolution windows, DSpark's context rows or DFlash2's feature window) and resumes at the
+    same point to the same tokens, bit for bit, as a resume from the GPU prefix cache; DFlash2 resumes drafting
+    from the window it kept with the prefix in both."""
     from hibana.engine import config as engine_config
     from hibana.engine.executor import Executor
     from hibana.engine.sampler import SamplingParams
     before = engine_config.current()
-    engine_config.install(before.replace(spec="7", spec_depths="1:3", ssd=True, ssd_dir=str(tmp_path), ssd_gib=2.0, ssd_block_tokens=64))
+    engine_config.install(before.replace(spec="7", proposer=proposer, spec_depths="1:3", ssd=True, ssd_dir=str(tmp_path), ssd_gib=2.0,
+                                         ssd_block_tokens=64))
     try:
         model = load()
         ex = Executor(model, num_pages=8192, num_slots=8, max_batch=1, log=None)
-        ex.enable_spec(7, proposer="dspark", state_strategy="snapshots")
+        ex.enable_spec(7, proposer=proposer, state_strategy="snapshots")
         ex.capture_graphs(log=None)
         ex.enable_ssd_tier()
         tier = ex.cache.ssd
@@ -318,7 +322,11 @@ def test_ssd_resume_matches_a_resume_from_memory(tmp_path):
         memory = run()
         assert 64 <= memory[0] <= boundary, memory[0]
         stored = held(memory[0])
-        assert any(k.startswith("pool.") for k in stored) and any(k.startswith("paux.dspark") for k in stored)
+        assert any(k.startswith("pool.") for k in stored)
+        assert proposer != "dspark" or any(k.startswith("paux.dspark") for k in stored)
+        draft = ex.spec.proposer
+        if proposer == "dflash2":  # the second run resumed from memory with the window kept at the prefix
+            assert (draft.cache_hits, draft.cache_fallbacks) == (1, 0)
         tier.drain(ex.cache)
         ex.cache.evict(need_pages=ex.kv_pool.num_pages)
         assert ex.cache.match(ids, touch=False).length == 0
@@ -326,6 +334,8 @@ def test_ssd_resume_matches_a_resume_from_memory(tmp_path):
         restored = held(memory[0])
         assert [k for k in stored if not torch.equal(stored[k], restored[k])] == []
         assert run() == memory
+        if proposer == "dflash2":  # and from the SSD tier with the window it stored
+            assert (draft.cache_hits, draft.cache_fallbacks) == (2, 0)
         ex.state.check()
         tier.drain(ex.cache)
         ex.flush_cache()

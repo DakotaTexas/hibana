@@ -142,7 +142,7 @@ def run_engine(args, parser) -> int:
         if family == "flashnext" and args.spec and args.proposer == "dflash2":
             parser.error("Flash-Next serves DFlash2 on one Spark: serve MTP tensor-parallel")
     # One configuration for the process: the environment with the command line applied.
-    engine_config.install(cfg.replace(spec=str(args.spec), traces=traces, traces_max_mib=max_mib, draft_dir=draft_dir,
+    engine_config.install(cfg.replace(spec=str(args.spec), proposer=args.proposer, traces=traces, traces_max_mib=max_mib, draft_dir=draft_dir,
                                       target=target, max_context=max_context, accept_default=f"{accept_default[0]}:{accept_default[1]}",
                                       max_batch=max_batch, spec_depths=spec_depths if args.spec else None,
                                       accept_soft=accept_soft))

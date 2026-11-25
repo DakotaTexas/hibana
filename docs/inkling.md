@@ -10,7 +10,8 @@ hibana chat inkling
 ```
 
 It serves text only (the checkpoint's vision tower is not loaded) and drafts with the checkpoint's bundled DSpark
-drafter, verifying drafts exactly in every profile. `exact` serves the checkpoint's own weights; `fast` (the
+drafter, or with incoai's DFlash2 draft (`HIBANA_PROPOSER=dflash2`, [DFlash2](#dflash2)), verifying drafts exactly in
+every profile. `exact` serves the checkpoint's own weights; `fast` (the
 default) and `throughput` quantize the attention projections and the vocabulary head to FP8 at load and share
 experts within a budget ([expert sharing](#expert-sharing)), and `throughput` decodes up to 16 requests together.
 Every profile keeps the SSD tier on, as the other targets do.
@@ -149,6 +150,55 @@ one request: the median of the prompts' decode tokens/s; streams: closed loop, a
 The drafter earns most on math and structured output (`fast`, greedy: 81 and 75 tokens/s) and least on prose (52).
 Cold real-text prompts of 2,000, 9,300 and 17,000 tokens prefill at 3,800-3,900 tokens/s in `exact` and about 4,000
 in `fast`.
+
+## DFlash2
+
+`HIBANA_PROPOSER=dflash2` drafts with `incoai/Inkling-2-Mini-DFlash2` (pinned in `model/inkling/config.py`, downloaded
+by the launcher): the DFlash2 drafter the 27B and Flash-Next serve (`model/parallel_draft.py`,
+`proposers/parallel.py`), five layers over a block of the pending token and seven mask rows, and a selector that
+walks the top 16 candidates of each position. Three things are Inkling's, as in the publisher's SGLang patch: its
+fourth tap (layer id 48) is the target's final norm, which the target computes anyway (`FeatureRequest.final_norm`);
+its block embeds through the target's embedding norm (`Inkling.embed_ids`); and its selector softcaps the scores after
+the predecessor correction (`selector_softcap_mode: after_correction`), so the candidates come from the head's logits
+before the softcap (`Inkling.head_logits`). Its context is a 2,048-position window of projected features a request,
+kept with each cached prefix and stored with it by the SSD tier, as for the 27B. With it the bundled DSpark drafter is
+not loaded.
+
+A round verifies all 7 drafts at one to four requests (`HIBANA_SPEC_DEPTHS=1:7,2:7,4:7,8:0,16:0`; `throughput` at
+every batch). On six chat, code and math prompts (greedy, 128 tokens) it emits 3.63 tokens a round against DSpark's
+2.39 at the same depth (2.57 and 2.20 at depth 3), and every emitted token agrees with a stand-alone prefill as often
+as DSpark's. Served on one GB10 over the 18 h2h prompts (as [DSpark](#dspark)'s table; one run each), `exact`:
+
+| | 1 request, greedy | 1 request, T 0.7 | 2 streams | 4 streams |
+|---|---|---|---|---|
+| DSpark | 54.8 | 53.8 | 72.3 | 100.6 |
+| DFlash2 | 58.6 | 60.6 | 82.6 | 111.8 |
+| DFlash2 verifying 5 / 4 | 55.5 / 55.6 | 51.1 / 58.6 | 80.4 / 81.9 | 109.4 / 107.3 |
+
+and `fast` with up to 16 requests and drafts at every batch (DSpark verifying 3, DFlash2 7):
+
+| | 1 request, greedy | 1 request, T 0.7 | 2 | 4 | 8 | 16 streams |
+|---|---|---|---|---|---|---|
+| no drafter, keep 6 with 16:64 | 53.4 | 52.1 | 74.2 | 98.8 | 125.8 | 196.0 |
+| DSpark, keep 6 with 16:64 | 72.1 | 67.0 | 86.7 | 112.3 | 173.3 | 243.3 |
+| DFlash2, no sharing | 75.2 | 69.7 | 91.9 | 124.3 | 163.8 | 300.0 |
+| DFlash2, keep 6 with 20:80 | 73.4 | 72.5 | 96.7 | 128.5 | 176.9 | 304.8 |
+| DFlash2, keep 6 with 16:64 | 80.2 | 76.1 | 99.9 | 133.4 | 178.8 | 303.3 |
+
+DFlash2 earns most on math (`exact`, greedy: 87.4 against DSpark's 64.8 tokens/s) and least on prose (44.9 against
+41.4). It shares experts within a wider budget than DSpark, keep 6 with 20 a request up to 80 a call, because it
+verifies 8 rows a request where DSpark verifies 4: replaying teacher-forced GPQA reasoning, that keeps 95.8 / 98.6 /
+99.9% of each row's top-8 routing at 1 / 2 / 4 requests, about what 16:64 keeps for DSpark (96.1 / 99.1 / 100%), where
+16:64 keeps 94.5 / 97.0 / 99.5% of DFlash2's. Sharing buys DFlash2 nothing at 16 streams. MMLU-Pro balanced (420 items,
+sampled with thinking on, 16K cap, four at a time, one seed, exact acceptance), paired with DSpark's `fast`: 79.8%
+against 79.3% (14 better / 12 worse, p 0.85), 3,152 tokens an item against 3,275, 14 answers at the cap against 18.
+At a 16K cap GPQA Diamond mostly counts answers cut off (every config scores 92-95% on the rest), so it is reported
+with the cap count: DFlash2 at 24:96 67.2% (54 capped) and at 16:64 65.2% (60) against DSpark's 69.7% (51).
+
+Soft acceptance (s 0.5) took DFlash2's drafts far more often (one request at T 0.7 +17%) and moved neither GPQA (65.2%
+either way, 15 answers newly at the cap against 11 freed, tokens x1.01) nor, as with DSpark, accuracy on finished
+answers. DSpark's drafts are point masses, which the sampled rule accepts with probability min(1, p e^s); DFlash2's are
+drawn from a law near the target's. One seed, so `fast` applies DSpark's s = 0.25 to both.
 
 ## Expert sharing
 

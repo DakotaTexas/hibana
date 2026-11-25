@@ -120,6 +120,11 @@ def profile_defaults(profile: str, target: str, flashnext_experts: str = "w3", t
         p = {"HIBANA_SPEC": "7", "HIBANA_SPEC_DEPTHS": "1:3,2:3,4:3,8:0,16:0", "HIBANA_W3_DECODE": "0", "HIBANA_ACCEPT_DEFAULT": "off",
              "HIBANA_ACCEPT_SOFT": "0", "HIBANA_DEVICE_ACCEPT": "0", "HIBANA_MAX_BATCH": "4", "HIBANA_SSD": "1",
              "HIBANA_INKLING_TRUNK": "bf16"}
+        if proposer == "dflash2":
+            # incoai's DFlash2 draft (docs/inkling.md#dflash2): a round verifies its whole block of 7 at one to four
+            # requests. Same h2h measurement, `exact`: 58.6 / 60.6, 82.6 / 111.8 against DSpark's 54.8 / 53.8, 72.3 /
+            # 100.6; verifying 5 or 4 was slower (55.5 / 51.1, 80.4 / 109.4 and 55.6 / 58.6, 81.9 / 107.3)
+            p.update(HIBANA_SPEC="7", HIBANA_SPEC_DEPTHS="1:7,2:7,4:7,8:0,16:0", HIBANA_DRAFT="pinned")
         if profile == "exact":
             return p
         # fast, throughput: the attention projections and the vocabulary head in FP8 (the checkpoint's are BF16): a decode
@@ -137,9 +142,22 @@ def profile_defaults(profile: str, target: str, flashnext_experts: str = "w3", t
         # s = 0.5 (longer answers, more at the cap). T 0.7 h2h: one request +11%, 2 / 4 streams +4%. Greedy requests
         # stay exact: top-2 within 1.0 scored MMLU-Pro greedy 79.5% against 82.0% (p 0.27).
         p["HIBANA_ACCEPT_SOFT"] = "0.25"
+        if proposer == "dflash2":
+            # DFlash2 verifies 8 rows a request where DSpark verifies 4, so its budget is wider: keep 6 with 20 a request up
+            # to 80 a call keeps the routing 16:64 keeps for DSpark's rows (replaying GPQA reasoning, each row's top-8
+            # score mass at 1 / 2 / 4 requests: 95.8 / 98.6 / 99.9% against 96.1 / 99.1 / 100%). MMLU-Pro balanced (420,
+            # sampled with thinking on, 4 requests, exact acceptance): 79.8% against DSpark's 79.3% (p 0.85), answers 4%
+            # shorter, 14 at the 16K cap against 18. h2h with drafts at every batch: 73.4 / 72.5, 96.7 / 128.5 / 176.9 /
+            # 304.8 tok/s against DSpark's 72.1 / 67.0, 86.7 / 112.3 / 173.3 / 243.3 (one request greedy / T 0.7, then
+            # 2 / 4 / 8 / 16 streams). Soft acceptance is unmeasured with these drafts at s = 0.25.
+            p.update(HIBANA_MOE_KEEP="6", HIBANA_MOE_BUDGET="20:80")
         if profile == "throughput":
             # a flat cap of 20 at keep 4 did better at 8-16 streams (exact: +31% / +33% against +5% / +25%)
             p.update(HIBANA_MAX_BATCH="16", HIBANA_MOE_KEEP="4", HIBANA_MOE_BUDGET="20")
+            if proposer == "dflash2":
+                # DFlash2 drafts at every batch: at 16 streams verifying its 7 drafts gave 304.8 tok/s against 196.0 for
+                # plain decode (keep 6, 16:64), and sharing changed nothing there. Accuracy above 4 requests is unmeasured.
+                p.update(HIBANA_SPEC_DEPTHS="1:7,2:7,4:7,8:7,16:7", HIBANA_MOE_KEEP="6", HIBANA_MOE_BUDGET="20:80")
         return p
     flashnext = target == "flashnext"
     if profile == "exact":
@@ -522,13 +540,15 @@ def resolve(target: str | None = None, profile: str | None = None, overrides: di
         _check(precision == "bf16", "Bolt LiLiCorr uses its published W4A16/BF16 draft weights")
         _check(kv_format in ("fp8", "sim-bf16"), "Bolt supports FP8 KV or sim-bf16 for parity")
     if name == "inkling":
-        _check(spec == 0 or (proposer == "dspark" and spec == 7),
-               "Inkling drafts with its bundled DSpark, a block of 7 (HIBANA_SPEC=7; HIBANA_SPEC_DEPTHS says how many a round verifies), or HIBANA_SPEC=0")
+        _check(spec == 0 or (proposer == "dspark" and spec == 7) or (proposer == "dflash2" and 1 <= spec <= 15),
+               "Inkling drafts with its bundled DSpark, a block of 7 (HIBANA_SPEC=7; HIBANA_SPEC_DEPTHS says how many a round "
+               "verifies), with DFlash2 (HIBANA_PROPOSER=dflash2, 1..15 drafts), or HIBANA_SPEC=0")
         _check(values.get("HIBANA_VERIFY_STATE", "snapshots") == "snapshots", "Inkling verifies with HIBANA_VERIFY_STATE=snapshots (it has no recurrent state to reconstruct)")
         _check(kv_format in ("fp8", "sim-bf16"), "Inkling supports FP8 KV, or sim-bf16 for parity")
         _check(values.get("HIBANA_INKLING_TRUNK", "bf16") in ("bf16", "fp8"), "HIBANA_INKLING_TRUNK must be bf16 or fp8")
     _check(proposer in ("mtp", "dflash2", "dspark"), f"HIBANA_PROPOSER must be mtp, dflash2 or dspark (got {proposer!r})")
-    _check((proposer == "dspark") == (name == "inkling"), "HIBANA_PROPOSER=dspark is Inkling's drafter, and Inkling's only one")
+    _check(proposer != "dspark" or name == "inkling", "HIBANA_PROPOSER=dspark is Inkling's bundled drafter")
+    _check(proposer != "mtp" or name != "inkling", "Inkling has no MTP head: HIBANA_PROPOSER=dspark or dflash2")
     _check(precision != "fp8" or (spec and proposer == "dflash2"), "FP8 draft precision requires enabled DFlash2 speculation")
     if values.get("HIBANA_SPEC_POLICY") == "budget":
         _check(name == "qwen38" and spec and proposer == "dflash2",
