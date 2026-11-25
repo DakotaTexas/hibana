@@ -83,8 +83,8 @@ PyTorch operators:
   residual, the message gate, the RMS norm), the projections, `prep` (queries, relative logits, convolved keys and
   values written to their page), `attention` over the pages the engine planned, `conv`, `route` and the experts on
   the checkpoint's packed NVFP4 (layers 0-19) and MXFP8 (layers 20-23) tensors: the tensor cores' block-scaled
-  product a (row, expert) pair at a time (`pair_mm`), the activation in the up projection's epilogue, and above 192
-  pairs grouped by expert on the GPU. A verified row's convolutions read
+  product a (row, expert) pair at a time (`pair_mm`), the activation in the up projection's epilogue, and above 24
+  rows the pairs sorted by expert on the GPU as prefill's are. A verified row's convolutions read
   its request's earlier rows, the stored windows stay as they are, and the window after each row is kept for the
   commit (`HIBANA_VERIFY_STATE=snapshots`: there is no recurrent state to reconstruct).
 

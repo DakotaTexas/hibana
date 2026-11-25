@@ -6,10 +6,10 @@
     expert(x) = W_2 (softcap_4(g) * sigmoid(g) * softcap_25(u)),   [g; u] = W_13 x,   softcap_c(z) = c tanh(z / c)
 
 The experts run on the checkpoint's packed tensors (NVFP4 in layers 0-19, MXFP8 in 20-23), their inputs quantized as
-hf_quant_config.json requires. Prefill sorts the (token, expert) pairs by expert; decode and verification multiply
-each pair where it is, inside CUDA graphs (`kernels/inkling_prefill.py`). HIBANA_MOE_KEEP / HIBANA_MOE_BUDGET (off
-by default) share experts across a decode or verification call through Nemotron's `route_budget`, which ranks the
-same way.
+hf_quant_config.json requires. Prefill and wide decode or verification calls sort the (token, expert) pairs by
+expert; calls of up to `PAIR_ROWS` rows multiply each pair where it is (`kernels/inkling_prefill.py`).
+HIBANA_MOE_KEEP / HIBANA_MOE_BUDGET (off by default) share experts across a decode or verification call through
+Nemotron's `route_budget`, which ranks the same way.
 """
 
 from __future__ import annotations
@@ -71,24 +71,26 @@ class Moe:
         """x [M, H] BF16 -> the routed experts' weighted sum, BF16. `slots` and `steps` (decode and verification:
         the requests' state slots, rows a request) let HIBANA_MOE_KEEP share experts."""
         nvfp4 = self.packed[0].dtype == torch.uint8
-        if x.shape[0] <= kernels.MOE_ROWS and self.pair_calls:
-            x = x.contiguous()
-            if self.keep and slots is not None:
-                ids, weights = self.share(x, slots, steps)
-            else:
-                ids, weights = kernels.route(x, self.router16, self.bias, c.EXPERTS_PER_TOKEN, c.ROUTE_SCALE)
-            quantize = prefill.quantize_nvfp4 if nvfp4 else prefill.quantize_mxfp8
-            act = prefill.pair_mm(quantize(x), ids, c.EXPERTS_PER_TOKEN, *self.packed[:3], swiglu=(c.GATE_SOFTCAP, c.UP_SOFTCAP))
-            down = prefill.pair_mm(quantize(act), ids, 1, *self.packed[3:])
-            return kernels.combine(down, None, weights)
+        x = x.contiguous()
+        rows = x.shape[0]
         shared = bool(self.keep) and slots is not None
-        ids, weights = self.share(x, slots, steps) if shared else self.route(x)
+        if shared:
+            ids, weights = self.share(x, slots, steps)
+        elif rows <= kernels.MOE_ROWS and self.pair_calls:
+            ids, weights = kernels.route(x, self.router16, self.bias, c.EXPERTS_PER_TOKEN, c.ROUTE_SCALE)
+        else:
+            ids, weights = self.route(x)
+        if self.pair_calls and rows <= prefill.PAIR_ROWS:
+            quantize = prefill.quantize_nvfp4 if nvfp4 else prefill.quantize_mxfp8
+            act = prefill.pair_mm(quantize(x), ids, c.EXPERTS_PER_TOKEN, *self.packed[:3], swiglu=(c.GATE_SOFTCAP, c.UP_SOFTCAP), repeats=shared)
+            down = prefill.pair_mm(quantize(act), ids, 1, *self.packed[3:], repeats=shared)
+            return kernels.combine(down, None, weights)
         # pairs sorted by expert on the GPU (no host sync): each expert multiplies one run of rows, one launch a projection
         plan = prefill.place(ids, c.NUM_EXPERTS, repeats=shared)
         if nvfp4:
-            hidden = prefill.grouped_mm4(*prefill.quantize_nvfp4(x.contiguous()), plan, True, *self.packed[:3])
+            hidden = prefill.grouped_mm4(*prefill.quantize_nvfp4(x), plan, True, *self.packed[:3])
             down = prefill.grouped_mm4(*prefill.swiglu_quantize(hidden, True, c.GATE_SOFTCAP, c.UP_SOFTCAP), plan, False, *self.packed[3:])
         else:
-            hidden = prefill.grouped_mm8(*prefill.quantize_mxfp8(x.contiguous()), plan, True, *self.packed[:3])
+            hidden = prefill.grouped_mm8(*prefill.quantize_mxfp8(x), plan, True, *self.packed[:3])
             down = prefill.grouped_mm8(*prefill.swiglu_quantize(hidden, False, c.GATE_SOFTCAP, c.UP_SOFTCAP), plan, False, *self.packed[3:])
         return kernels.combine(down, plan.where.view_as(ids), weights.contiguous())

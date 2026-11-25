@@ -177,9 +177,8 @@ def test_kernel_visit_matches_the_reference_layer(index, fp4, message, kv_dtype,
 @pytest.mark.parametrize("rows", [5, 40])
 @pytest.mark.parametrize("fp4", [True, False])
 def test_decode_and_prefill_experts_agree(fp4, rows):
-    """Decode's experts (the route kernel, a product a (row, expert) pair, or at 40 rows the pairs grouped by expert on
-    the device) against prefill's (the wide route kernel, the pairs sorted by expert) on the same packed NVFP4 / MXFP8
-    tensors."""
+    """Decode's experts (the route kernel, a product a (row, expert) pair, or at 40 rows the pairs sorted by expert)
+    against prefill's (the wide route kernel, the pairs sorted by expert) on the same packed NVFP4 / MXFP8 tensors."""
     w = layer_weights(3, fp4)
     moe = Moe(w, f"{c.PREFIX}.layers.3.mlp", DEVICE)
     x = torch.randn((rows, H), generator=torch.Generator().manual_seed(3)).to(torch.bfloat16).to(DEVICE)
@@ -194,18 +193,17 @@ def test_decode_and_prefill_experts_agree(fp4, rows):
 
 @pytest.mark.parametrize("fp4", [True, False])
 def test_shared_experts_agree_on_both_paths(fp4):
-    """Expert sharing at 64 rows (16 requests x 4), the rows alike and a budget under a row's 8 experts, so each row
-    fills its unused slots with its top expert at weight 0: that expert holds 5 x 64 pairs. Decode's grouped pair path
-    against the sorted prefill path on the same budgeted routing; a grouped path that kept only its first 64 pairs
-    an expert dropped later rows' real pairs and read unwritten rows."""
+    """Expert sharing at 24 rows (6 requests x 4), the rows alike and a budget under a row's 8 experts, so each row
+    fills its unused slots with its top expert at weight 0: that expert holds 5 x 24 pairs. Decode's pair path, which
+    leaves the filler pairs unwritten, against the sorted prefill path on the same budgeted routing."""
     w = layer_weights(3, fp4)
     moe = Moe(w, f"{c.PREFIX}.layers.3.mlp", DEVICE)
     moe.keep, moe.per_request, moe.budget = 2, 0, 4
     gen = torch.Generator().manual_seed(5)
-    x = (torch.randn((1, H), generator=gen) + 0.05 * torch.randn((64, H), generator=gen)).to(torch.bfloat16).to(DEVICE)
-    slots = torch.arange(1, 17, dtype=torch.int32, device=DEVICE)
+    x = (torch.randn((1, H), generator=gen) + 0.05 * torch.randn((24, H), generator=gen)).to(torch.bfloat16).to(DEVICE)
+    slots = torch.arange(1, 7, dtype=torch.int32, device=DEVICE)
     ids, weights = moe.share(x, slots, 4)
-    assert int(torch.bincount(ids.flatten()).max()) > 64 and int((weights == 0).sum()) > 0
+    assert int(torch.bincount(ids.flatten()).max()) > 24 and int((weights == 0).sum()) > 0
     packed = moe(x, slots, 4)
     Moe.pair_calls = False
     try:

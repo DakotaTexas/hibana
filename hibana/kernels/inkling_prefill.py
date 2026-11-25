@@ -6,7 +6,8 @@ Prefill: `route` and `place` pick and sort a call's (token, expert) pairs on the
 and `grouped_mm8` multiply every expert in one block-scaled tensor-core launch a projection (a GEMM an expert took
 12 ms a visit). `conv`, `mix`, `gate`, `queries` and `attention` are the steps between.
 
-Decode and verification: `pair_mm` multiplies each (row, expert) pair where it is, inside CUDA graphs.
+Decode and verification calls of up to `PAIR_ROWS` rows: `pair_mm` multiplies each (row, expert) pair where it is;
+wider ones sort as prefill does. Both run inside CUDA graphs.
 """
 
 from __future__ import annotations
@@ -276,11 +277,11 @@ def place(ids: torch.Tensor, experts: int, repeats: bool = False) -> Plan:
 
 
 @triton.jit
-def _tile(Tiles, Starts, Token, BM: tl.constexpr, GATHER: tl.constexpr):
+def _tile(Tiles, Starts, Token, BM: tl.constexpr, GATHER: tl.constexpr, ACROSS: tl.constexpr):
     """A product program's tile: (expert, its sorted rows [BM] int64, which are live, each one's input row, its output tile).
-    The up projection's programs run tiles fastest, the down projection's output tiles fastest: 1.31 against 1.61 ms
-    for an NVFP4 down projection of 1,678 tokens (MXFP8 1.92 against 2.95), the up projection 2.03 against 2.21."""
-    tile = tl.program_id(0) if GATHER else tl.program_id(1)
+    The programs run output tiles fastest (ACROSS) or row tiles fastest: for 1,678 tokens an NVFP4 down projection
+    1.31 against 1.61 ms (MXFP8 1.92 against 2.95), the up projection 2.21 against 2.03."""
+    tile = tl.program_id(1) if ACROSS else tl.program_id(0)
     expert = tl.load(Tiles + tile * 2)
     first = tl.load(Tiles + tile * 2 + 1)
     rows = first + tl.arange(0, BM)
@@ -288,13 +289,18 @@ def _tile(Tiles, Starts, Token, BM: tl.constexpr, GATHER: tl.constexpr):
     source = rows
     if GATHER:  # a token's row, quantized once, read where each of its pairs needs it
         source = tl.load(Token + rows, valid, other=0)
-    return expert, rows.to(tl.int64), valid, source.to(tl.int64), tl.program_id(1) if GATHER else tl.program_id(0)
+    return expert, rows.to(tl.int64), valid, source.to(tl.int64), tl.program_id(0) if ACROSS else tl.program_id(1)
+
+
+# up projections of up to this many pairs (decode, verification) run output tiles fastest: real 128-row verify calls
+# 1.527 -> 1.492 ms (NVFP4), 64 rows 1.279 -> 1.253; down projections always do
+ACROSS_PAIRS = 1024
 
 
 @triton.jit
-def _grouped_mm8(A, AS, W, WS, Factor, Tiles, Starts, Token, Y, N: tl.constexpr, K: tl.constexpr, GATHER: tl.constexpr, BM: tl.constexpr,
-                 BN: tl.constexpr, BK: tl.constexpr):
-    expert, rows, valid, source, column = _tile(Tiles, Starts, Token, BM, GATHER)
+def _grouped_mm8(A, AS, W, WS, Factor, Tiles, Starts, Token, Y, N: tl.constexpr, K: tl.constexpr, GATHER: tl.constexpr, ACROSS: tl.constexpr,
+                 BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
+    expert, rows, valid, source, column = _tile(Tiles, Starts, Token, BM, GATHER, ACROSS)
     if expert < 0:
         return
     out = column * BN + tl.arange(0, BN)
@@ -322,17 +328,18 @@ def grouped_mm8(values: torch.Tensor, scales: torch.Tensor, plan: Plan, gather: 
     if pairs:
         # 128 x 128 tiles, 256 columns a step (512 does not fit the shared memory): 6.1 ms a projection against 7.9
         # with 64 outputs a tile and 8.2 with both sides decoded into BF16 operands
-        grid = (plan.tiles.shape[0], triton.cdiv(n, 128)) if gather else (triton.cdiv(n, 128), plan.tiles.shape[0])
+        across = not gather or pairs <= ACROSS_PAIRS
+        grid = (triton.cdiv(n, 128), plan.tiles.shape[0]) if across else (plan.tiles.shape[0], triton.cdiv(n, 128))
         _grouped_mm8[grid](
-            values, scales, weight, scale, factor, plan.tiles, plan.starts, plan.token, out, N=n, K=k, GATHER=gather, BM=TILE_ROWS, BN=128,
+            values, scales, weight, scale, factor, plan.tiles, plan.starts, plan.token, out, N=n, K=k, GATHER=gather, ACROSS=across, BM=TILE_ROWS, BN=128,
             BK=256, num_warps=8, num_stages=2)
     return out
 
 
 @triton.jit
-def _grouped_mm4(A, AS, Unit, W, WS, Factor, Tiles, Starts, Token, Y, N: tl.constexpr, K: tl.constexpr, GATHER: tl.constexpr, BM: tl.constexpr,
-                 BN: tl.constexpr, BK: tl.constexpr):
-    expert, rows, valid, source, column = _tile(Tiles, Starts, Token, BM, GATHER)
+def _grouped_mm4(A, AS, Unit, W, WS, Factor, Tiles, Starts, Token, Y, N: tl.constexpr, K: tl.constexpr, GATHER: tl.constexpr,
+                 ACROSS: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
+    expert, rows, valid, source, column = _tile(Tiles, Starts, Token, BM, GATHER, ACROSS)
     if expert < 0:
         return
     out = column * BN + tl.arange(0, BN)
@@ -364,10 +371,11 @@ def grouped_mm4(codes: torch.Tensor, scales: torch.Tensor, unit: torch.Tensor, p
     out = torch.empty((pairs, n), dtype=torch.bfloat16, device=codes.device)
     if pairs:
         # 128 x 128 tiles: 1,401 tokens take 6.0 ms a visit for the whole MoE (64-wide tiles 6.2 to 6.3)
-        grid = (plan.tiles.shape[0], triton.cdiv(n, 128)) if gather else (triton.cdiv(n, 128), plan.tiles.shape[0])
+        across = not gather or pairs <= ACROSS_PAIRS
+        grid = (triton.cdiv(n, 128), plan.tiles.shape[0]) if across else (plan.tiles.shape[0], triton.cdiv(n, 128))
         _grouped_mm4[grid](
             codes, scales, unit, weight, scale.view(torch.float8_e4m3fn), factor, plan.tiles, plan.starts, plan.token, out,
-            N=n, K=k, GATHER=gather, BM=TILE_ROWS, BN=128, BK=512, num_warps=8, num_stages=2)
+            N=n, K=k, GATHER=gather, ACROSS=across, BM=TILE_ROWS, BN=128, BK=512, num_warps=8, num_stages=2)
     return out
 
 
@@ -451,10 +459,16 @@ def _swiglu_store(Y, acc, rows, valid, cols, N: tl.constexpr, BM: tl.constexpr, 
 @triton.jit
 def _pair_mm(A, AS, Unit, Ids, W, WS, Factor, Y, SHARE: tl.constexpr, FP4: tl.constexpr, N: tl.constexpr, K: tl.constexpr, KM: tl.constexpr,
              KT: tl.constexpr, VB: tl.constexpr, G: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr, STEPS: tl.constexpr,
-             GATE_CAP: tl.constexpr, UP_CAP: tl.constexpr):
+             GATE_CAP: tl.constexpr, UP_CAP: tl.constexpr, TOPK: tl.constexpr, REPEATS: tl.constexpr):
     pair = tl.program_id(0)
     row = (pair // SHARE).to(tl.int64)
     expert = tl.load(Ids + pair)
+    if REPEATS:  # expert sharing's weight-0 filler (a repeat of an expert its row named in an earlier slot) is left unwritten
+        repeat = False
+        for i in tl.static_range(1, TOPK):
+            repeat = repeat | (tl.load(Ids + pair - i, (pair % TOPK) >= i, other=-1) == expert)
+        if repeat:
+            return
     lead = tl.arange(0, BM) == 0  # the product's other rows stay empty
     spread = tl.zeros((BM, 1), tl.int64)
     KB: tl.constexpr = K // VB  # bytes a row (VB values a byte)
@@ -497,70 +511,19 @@ def _pair_mm(A, AS, Unit, Ids, W, WS, Factor, Y, SHARE: tl.constexpr, FP4: tl.co
             tl.store(Y + pair.to(tl.int64) * N + out[None, :] + spread, acc.to(tl.bfloat16), lead[:, None])
 
 
-@triton.jit(do_not_specialize=['P'])
-def _expert_mm(A, AS, Unit, Ids, W, WS, Factor, Y, P, PP: tl.constexpr, E: tl.constexpr, SHARE: tl.constexpr, FP4: tl.constexpr,
-               N: tl.constexpr, K: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr, GATE_CAP: tl.constexpr, UP_CAP: tl.constexpr,
-               TOPK: tl.constexpr):
-    """`_pair_mm` for calls of many pairs, grouped on the device: program (g, column tile) multiplies all the pairs of
-    the g-th expert present in Ids in one product. A row's later repeats of an expert are skipped (their rows of Y are
-    not written): expert sharing fills a row's unused slots with its top expert at weight 0, and without the skip one
-    expert could hold more pairs than BM; with it, an expert has at most a pair a row, so at most BM."""
-    g = tl.program_id(0)
-    p = tl.arange(0, PP)
-    ids = tl.load(Ids + p, p < P, other=-1).to(tl.int32)
-    e = tl.arange(0, E)
-    present = tl.max((ids[None, :] == e[:, None]).to(tl.int32), 1)
-    if g >= tl.sum(present, 0):
-        return
-    expert = tl.sum(tl.where((present == 1) & (tl.cumsum(present, 0) - present == g), e, 0), 0)
-    row_ids = tl.reshape(ids, (PP // TOPK, TOPK))
-    j = tl.arange(0, TOPK)
-    earlier = (row_ids[:, :, None] == row_ids[:, None, :]) & (j[:, None] < j[None, :])[None, :, :]  # [row, i, j]: slot i < j, same expert
-    repeat = tl.reshape(tl.max(earlier.to(tl.int32), 1), (PP,)) > 0
-    mine = (ids == expert) & ~repeat
-    slot = tl.arange(0, BM)
-    match = ((tl.cumsum(mine.to(tl.int32), 0) - 1)[None, :] == slot[:, None]) & mine[None, :]
-    pair = tl.sum(tl.where(match, p[None, :], 0), 1).to(tl.int64)  # the expert's pairs in slots 0, 1, ...
-    valid = tl.max(match.to(tl.int32), 1) > 0
-    row = pair // SHARE
-    out = tl.program_id(1) * BN + tl.arange(0, BN)
-    cols = expert.to(tl.int64) * N + out
-    acc = tl.zeros((BM, BN), tl.float32)
-    for k in range(tl.cdiv(K, BK)):
-        if FP4:
-            packed = k * (BK // 2) + tl.arange(0, BK // 2)
-            groups = k * (BK // 16) + tl.arange(0, BK // 16)
-            a = tl.load(A + row[:, None] * (K // 2) + packed[None, :], valid[:, None] & (packed[None, :] < K // 2), other=0)
-            a_scale = tl.load(AS + row[:, None] * (K // 16) + groups[None, :], valid[:, None] & (groups[None, :] < K // 16), other=0.0)
-            w = tl.load(W + cols[None, :] * (K // 2) + packed[:, None], packed[:, None] < K // 2, other=0)
-            w_scale = tl.load(WS + cols[:, None] * (K // 16) + groups[None, :], groups[None, :] < K // 16, other=0.0)
-            acc = tl.dot_scaled(a, a_scale, "e2m1", w, w_scale, "e2m1", acc)
-        else:
-            ks = k * BK + tl.arange(0, BK)
-            groups = k * (BK // 32) + tl.arange(0, BK // 32)
-            a = tl.load(A + row[:, None] * K + ks[None, :], valid[:, None] & (ks[None, :] < K), other=0.0)
-            a_scale = tl.load(AS + row[:, None] * (K // 32) + groups[None, :], valid[:, None] & (groups[None, :] < K // 32), other=127)
-            w = tl.load(W + cols[None, :] * K + ks[:, None], ks[:, None] < K, other=0.0)
-            w_scale = tl.load(WS + cols[:, None] * (K // 32) + groups[None, :], groups[None, :] < K // 32, other=127)
-            acc = tl.dot_scaled(a, a_scale, "e4m3", w, w_scale, "e4m3", acc)
-    acc *= tl.load(Factor + expert)
-    if FP4:
-        acc *= tl.load(Unit + row, valid, other=0.0)[:, None]
-    if GATE_CAP > 0:
-        _swiglu_store(Y, acc, pair, valid, tl.program_id(1) * (BN // 2) + tl.arange(0, BN // 2), N, BM, BN, GATE_CAP, UP_CAP)
-    else:
-        tl.store(Y + pair[:, None] * N + out[None, :], acc.to(tl.bfloat16), valid[:, None])
-
-
-GROUP_PAIRS = 192  # calls of more (row, expert) pairs group them by expert on the device
+# Decode and verification calls up to this many rows multiply each pair where it is (`pair_mm`); wider ones sort their
+# pairs by expert as prefill does, reading each expert once. A visit's NVFP4 experts on real verify calls, pairs
+# against sorted: 24 rows 1.32 against 1.39 ms, 64 rows 2.48 against 1.99 (sharing experts K2 6:24: 1.76 against 1.11)
+PAIR_ROWS = 24
 
 
 def pair_mm(rows: tuple, ids: torch.Tensor, share: int, weight: torch.Tensor, scale: torch.Tensor, factor: torch.Tensor,
-            swiglu: tuple[float, float] | None = None) -> torch.Tensor:
+            swiglu: tuple[float, float] | None = None, repeats: bool = False) -> torch.Tensor:
     """`grouped_mm4` / `grouped_mm8` for the few rows of a decode or verification call, a program a (pair, output
     tile) with no sorting (it runs in a captured graph): pair p multiplies row p // share of `rows` (what
     `quantize_nvfp4` or `quantize_mxfp8` returned) by expert ids.flatten()[p] (int64 [T, k]; a row repeats an expert
-    only as weight-0 filler, whose rows the grouped path leaves unwritten for `combine` to skip). -> BF16 [P, N]; with `swiglu` =
+    only as expert sharing's weight-0 filler, whose rows `repeats` leaves unwritten, as `place` does, for `combine` to
+    skip). -> BF16 [P, N]; with `swiglu` =
     (gate cap, up cap), the activation of the gate/up column pairs instead, BF16 [P, N / 2], bitwise `_swiglu` of
     the BF16 product (a launch less a visit). Rows that share an expert each read it, the later
     ones from cache: with real verification routing a call reads about the distinct experts' bytes once."""
@@ -573,18 +536,10 @@ def pair_mm(rows: tuple, ids: torch.Tensor, share: int, weight: torch.Tensor, sc
     out = torch.empty((ids.numel(), n // 2 if swiglu else n), dtype=torch.bfloat16, device=ids.device)
     codes, scales, unit = rows if fp4 else (*rows, factor)
     gate_cap, up_cap = swiglu or (0.0, 0.0)
-    experts, pairs = weight.shape[0], ids.numel()
-    if pairs > GROUP_PAIRS:
-        # real routing, a visit's NVFP4 experts for 48 rows (a short prefill): 1,814 -> 1,578 us; 64 rows 2,285 ->
-        # 1,698 (the sorted grouped path with its host sync: 1,548 and 1,677); even at 16-24 rows, ahead from 28-32
-        _expert_mm[(min(pairs, experts), n // 64)](codes, scales, unit, ids, weight, scale.view(torch.float8_e4m3fn) if fp4 else scale, factor, out,
-                                                   P=pairs, PP=triton.next_power_of_2(pairs), E=experts, SHARE=share, FP4=fp4, N=n, K=k,
-                                                   BM=max(16, triton.next_power_of_2(ids.shape[0])), BN=64,
-                                                   BK=512 if fp4 else 256, GATE_CAP=gate_cap, UP_CAP=up_cap, TOPK=ids.shape[1], num_warps=4, num_stages=2)
-        return out
     _pair_mm[(ids.numel(), n // (bn * steps))](codes, scales, unit, ids, weight, scale.view(torch.float8_e4m3fn) if fp4 else scale, factor, out,
                                                SHARE=share, FP4=fp4, N=n, K=k, KM=main, KT=k - main, VB=2 if fp4 else 1, G=16 if fp4 else 32, BM=16, BN=bn,
-                                               STEPS=steps, GATE_CAP=gate_cap, UP_CAP=up_cap, num_warps=4, num_stages=2)
+                                               STEPS=steps, GATE_CAP=gate_cap, UP_CAP=up_cap, TOPK=ids.shape[1], REPEATS=repeats, num_warps=4,
+                                               num_stages=2)
     return out
 
 

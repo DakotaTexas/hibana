@@ -12,7 +12,7 @@ from pathlib import Path
 import torch
 
 _SRC = Path(__file__).resolve().parent / "csrc" / "inkling.cu"
-MOE_ROWS = 64  # calls up to this many rows (decode, verification) multiply their (row, expert) pairs unsorted
+MOE_ROWS = 64  # calls up to this many rows (decode, verification) route with `route`
 # Key splits a (row group, KV head): 12 fill one 96-key chunk a block on a sliding layer (four rows 23.2 against 27.3
 # us in 16); 16 on a full layer (1,024 keys 18.9 against 22.9 us in 32, equal at 32,000).
 LOCAL_SPLITS, GLOBAL_SPLITS = 12, 16
