@@ -198,3 +198,53 @@ def test_constraints_are_built_for_the_served_targets_vocabulary(monkeypatch, ta
                 'messages': [{'role': 'user', 'content': 'hi'}], 'response_format': {'type': 'json_object'}})
     asyncio.run(scenario())
     assert built == [(vocab, tuple(targets.get(target).stop_token_ids))]
+
+
+@pytest.mark.parametrize('default, kwargs, expected', [
+    (True, None, True), (False, None, False),
+    (False, {'enable_thinking': True}, True), (True, {'enable_thinking': False}, False),
+])
+def test_thinking_default_is_a_server_setting_and_a_request_overrides_it(default, kwargs, expected):
+    from hibana.engine import config
+    async def scenario():
+        queue = asyncio.Queue()
+        queue.put_nowait(([5], True, 'stop'))
+        engine = SimpleNamespace(submit=AsyncMock(return_value=SimpleNamespace(queue=queue, req=SimpleNamespace(prefix_len=0))), cancel=Mock())
+        tok = SimpleNamespace(encode=Mock(return_value=[1]), decode=lambda ids, **kwargs: 'ok')
+        template = SimpleNamespace(render=Mock(return_value='prompt'))
+        app = create_app(engine, tok, template, {})
+        body = {'messages': [{'role': 'user', 'content': 'hi'}]}
+        if kwargs is not None:
+            body['chat_template_kwargs'] = kwargs
+        with config.using(config.current().replace(default_thinking=default)):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url='http://test') as client:
+                response = await client.post('/v1/chat/completions', json=body)
+        assert response.status_code == 200
+        assert template.render.call_args.kwargs['enable_thinking'] is expected
+    asyncio.run(scenario())
+
+
+def test_models_lists_the_alias_first_keeps_real_root_and_gives_max_model_len():
+    from hibana.engine import config
+    async def scenario():
+        app = create_app(SimpleNamespace(), SimpleNamespace(), SimpleNamespace(),
+                         {'model_path': 'RadixArk/Test', 'context_length': 262144})
+        with config.using(config.current().replace(model_alias='qwen3-coder')):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url='http://test') as client:
+                data = (await client.get('/v1/models')).json()['data']
+        assert [m['id'] for m in data] == ['qwen3-coder', 'RadixArk/Test']
+        assert all(m['root'] == 'RadixArk/Test' and m['max_model_len'] == 262144 for m in data)
+    asyncio.run(scenario())
+
+
+def test_models_without_an_alias_lists_one_model():
+    from hibana.engine import config
+    async def scenario():
+        app = create_app(SimpleNamespace(), SimpleNamespace(), SimpleNamespace(),
+                         {'model_path': 'RadixArk/Test', 'context_length': 1000})
+        with config.using(config.current().replace(model_alias='')):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url='http://test') as client:
+                data = (await client.get('/v1/models')).json()['data']
+        assert [m['id'] for m in data] == ['RadixArk/Test']
+        assert data[0]['max_model_len'] == 1000
+    asyncio.run(scenario())

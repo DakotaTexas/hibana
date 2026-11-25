@@ -130,3 +130,10 @@ def test_the_ssd_tier_stores_in_the_users_data_directory_unless_moved():
     assert EngineConfig.from_env({}).ssd_dir == EngineConfig().ssd_dir == default
     cfg = EngineConfig.from_env({"HIBANA_SSD_DIR": "/nvme/ssd", "HIBANA_SSD_GIB": "50"})
     assert cfg.ssd_dir == "/nvme/ssd" and cfg.ssd_gib == 50.0
+
+
+def test_http_api_defaults_read_the_environment():
+    assert EngineConfig.from_env({}).default_thinking is True
+    assert EngineConfig.from_env({"HIBANA_DEFAULT_THINKING": "0"}).default_thinking is False
+    assert EngineConfig.from_env({}).model_alias == ""
+    assert EngineConfig.from_env({"HIBANA_MODEL_ALIAS": "qwen3-coder"}).model_alias == "qwen3-coder"

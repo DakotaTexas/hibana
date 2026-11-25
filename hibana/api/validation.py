@@ -78,7 +78,8 @@ _EFFORT = {"low": "low", "medium": "medium", "high": "xhigh", "xhigh": "xhigh", 
 
 
 def _template_kwargs(body: dict) -> tuple[dict, bool]:
-    """chat_template_kwargs without enable_thinking, and the thinking switch (default on).
+    """chat_template_kwargs without enable_thinking, and the thinking switch (server default HIBANA_DEFAULT_THINKING,
+    else on; a request's chat_template_kwargs.enable_thinking overrides it).
 
     A client effort level (OpenAI `reasoning_effort`, Anthropic
     `output_config.effort`) selects the template's reasoning effort unless
@@ -88,7 +89,8 @@ def _template_kwargs(body: dict) -> tuple[dict, bool]:
     effort = body.get("reasoning_effort") or (config.get("effort") if isinstance(config, dict) else None)
     if "reasoning_effort" not in kwargs and isinstance(effort, str) and effort.lower() in _EFFORT:
         kwargs["reasoning_effort"] = _EFFORT[effort.lower()]
-    return kwargs, bool(kwargs.pop("enable_thinking", True))
+    from hibana.engine.config import current
+    return kwargs, bool(kwargs.pop("enable_thinking", current().default_thinking))
 
 
 def _output_spec(body: dict) -> tuple[str, object] | None:

@@ -126,6 +126,9 @@ class EngineConfig:
     ssd: bool = False                         # HIBANA_SSD
     ssd_gib: float = 200.0                    # HIBANA_SSD_GIB: its capacity
     ssd_dir: str = SSD_DIR                    # HIBANA_SSD_DIR: where it stores
+    # --- HTTP API defaults
+    default_thinking: bool = True             # HIBANA_DEFAULT_THINKING=0: chat requests without enable_thinking render with thinking off
+    model_alias: str = ""                     # HIBANA_MODEL_ALIAS: extra model id listed first in /v1/models; root stays the checkpoint id
     # the SSD tier's tuning
     ssd_block_tokens: int = 256               # HIBANA_SSD_BLOCK_TOKENS: tokens per SSD KV block (divides the 2048-token prefill chunk)
     ssd_trace: bool = False                   # HIBANA_SSD_TRACE: one line per restore in <ssd dir>/v2/restores.jsonl
@@ -209,6 +212,8 @@ class EngineConfig:
             ssd=_flag(e, "HIBANA_SSD"),
             ssd_gib=float(e.get("HIBANA_SSD_GIB") or "200"),
             ssd_dir=_str(e, "HIBANA_SSD_DIR", SSD_DIR),
+            default_thinking=_flag(e, "HIBANA_DEFAULT_THINKING", True),
+            model_alias=_str(e, "HIBANA_MODEL_ALIAS", ""),
             ssd_block_tokens=_ssd_block(_int(e, "HIBANA_SSD_BLOCK_TOKENS", 256)),
             ssd_trace=_flag(e, "HIBANA_SSD_TRACE"),
             ssd_writers=_positive(e, "HIBANA_SSD_WRITERS", 4),

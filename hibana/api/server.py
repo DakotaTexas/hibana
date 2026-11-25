@@ -226,7 +226,14 @@ def create_app(engine: EngineLoop, tok: SnapshotTokenizer, tmpl: ChatTemplate, d
 
     @app.get("/v1/models")
     async def models():
-        return {"object": "list", "data": [{"id": MODEL_ID, "object": "model", "owned_by": "hibana", "root": MODEL_ID}]}
+        from hibana.engine.config import current
+        max_len = describe.get("context_length", targets.DEFAULT_TARGET.context_length)
+        entry = {"object": "model", "owned_by": "hibana", "root": MODEL_ID, "max_model_len": max_len}
+        alias = current().model_alias
+        data = [{"id": MODEL_ID, **entry}]
+        if alias and alias != MODEL_ID:  # listed first so clients taking data[0].id see the alias; root stays MODEL_ID
+            data.insert(0, {"id": alias, **entry})
+        return {"object": "list", "data": data}
 
     @app.get("/get_server_info")
     @app.get("/describe")
