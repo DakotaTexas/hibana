@@ -12,6 +12,7 @@ decode and verification `decode_visit`; `Layer.forward` is the same layer in PyT
 
 from __future__ import annotations
 
+import hashlib
 import time
 from pathlib import Path
 
@@ -39,6 +40,22 @@ def attn_res(blocks: list[torch.Tensor], partial: torch.Tensor, query: torch.Ten
     stacked = torch.stack([*blocks, rms(partial)], dim=1)  # [T, N, H]
     weights = torch.softmax(stacked @ query.T * stacked.shape[-1] ** -0.5, dim=1)  # [T, N, Q]
     return torch.einsum("tnq,tnh->tqh", weights, stacked)
+
+
+# The sources whose arithmetic writes what the SSD tier stores (K/V, convolution windows, the drafter's context)
+KERNEL_SOURCES = tuple(Path(kernels.__file__).parent / name for name in
+                       ("csrc/inkling.cu", "inkling.py", "inkling_prefill.py", "inkling_dspark.py"))
+
+
+def arithmetic_identity(cfg) -> dict:
+    """What the SSD store keys an Inkling server's stored prefixes by beyond the checkpoint: the trunk's format, expert
+    sharing and the kernels' sources, each of which changes the K/V, convolution windows and drafter context a prefix
+    leaves, so a server never restores another's."""
+    identity = {"trunk": cfg.inkling_trunk,
+                "kernels": hashlib.sha256(b"".join(p.read_bytes() for p in KERNEL_SOURCES)).hexdigest()[:16]}
+    if 0 < cfg.moe_keep < c.EXPERTS_PER_TOKEN:  # Moe.keep: sharing on
+        identity["moe_sharing"] = f"{cfg.moe_keep}:{cfg.moe_budget_per_request}:{cfg.moe_budget}"
+    return identity
 
 
 class MessageGate:
@@ -244,11 +261,7 @@ class Inkling:
             # lists end there
             self.draft = InklingDraft(snap, self, cfg.max_context or target.context_length)
         self.state_slots = 0  # the state pool's slots, once registered
-        # the SSD store keys stored prefixes by the arithmetic that produced them: the trunk's format and expert sharing
-        # (K/V, convolution windows and the drafter's context all differ between them)
-        self.arithmetic_identity = {"trunk": self.precision}
-        if self.layers[0].moe.keep:
-            self.arithmetic_identity["moe_sharing"] = f"{cfg.moe_keep}:{cfg.moe_budget_per_request}:{cfg.moe_budget}"
+        self.arithmetic_identity = arithmetic_identity(cfg)
         if log:
             allocated = torch.cuda.memory_allocated() / 2**30 if self.device.type == "cuda" else 0.0
             log(f"  weights loaded in {time.perf_counter() - started:.0f}s, {allocated:.1f} GiB allocated ({self.stream_bytes / 1e9:.2f} GB per decode token)")
