@@ -104,7 +104,8 @@ class EngineConfig:
     trunk_keep_bf16: str | None = None        # HIBANA_TRUNK_KEEP_BF16: regex of Flash-Next projections kept BF16
     flashnext_experts: str = "w3"             # HIBANA_FLASHNEXT_EXPERTS: w3 (the W3 checkpoint's 3-bit routed experts when it carries them) | nvfp4
     bolt_experts: str = "b12x"                # HIBANA_BOLT_EXPERTS: b12x fused MoE (BF16 activations) | fp8 grouped native IQ2 | bf16 Triton weight-only
-    vision: bool = False                      # HIBANA_VISION: load the checkpoint's vision encoder for image input (Nemotron Super and Bolt; about 1.7 GiB)
+    vision: bool = False                      # HIBANA_VISION: load the checkpoint's vision encoder for image input
+    vision_max_pixels: int = 16_777_216       # HIBANA_VISION_MAX_PIXELS: the Qwen targets' resize cap per image (16,384 tokens)
     # --- speculation
     spec: str | None = None                   # HIBANA_SPEC as given ("auto"/unset: the proposer's default depth)
     spec_depths: str | None = None            # HIBANA_SPEC_DEPTHS: verify depth per batch bucket, "8:1,16:0" (0: plain decode; unset: HIBANA_SPEC everywhere)
@@ -190,6 +191,7 @@ class EngineConfig:
             flashnext_experts=_str(e, "HIBANA_FLASHNEXT_EXPERTS", "w3"),
             bolt_experts=_str(e, "HIBANA_BOLT_EXPERTS", "b12x"),
             vision=_flag(e, "HIBANA_VISION"),
+            vision_max_pixels=_positive(e, "HIBANA_VISION_MAX_PIXELS", 16_777_216),
             spec=_str(e, "HIBANA_SPEC"),
             spec_depths=_str(e, "HIBANA_SPEC_DEPTHS"),
             spec_step_cost=float(_str(e, "HIBANA_SPEC_STEP_COST") or 0.0),

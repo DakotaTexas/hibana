@@ -121,6 +121,8 @@ def test_streamed_verify_rows_match_the_block(table):
     extras._staging, extras._staged = None, None
 
     class Req:
+        media = ()
+
         def __init__(self, prompt, output):
             self.prompt_ids, self.output_ids = prompt, output
             self.context_len = len(prompt) + len(output)
@@ -195,6 +197,8 @@ def test_a_prompt_prefetches_its_later_chunks_once(table):
     extras.ple, extras.eos, extras._prefetched = ple, EOS, __import__("weakref").WeakSet()
 
     class Req:
+        media = ()
+
         def __init__(self, prompt):
             self.prompt_ids, self.output_ids = prompt, []
     prompt = [5, 9, EOS, 11, 3, 8, 2, 6, 4]

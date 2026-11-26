@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Optimized TP1/TP2 eager-prefill adapter; plans belong to one forward."""
+import dataclasses
 from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
@@ -48,10 +49,13 @@ class PrefillKernels:
         from .tiled_scaled import score
         side=ctx.extras;seqs=side.qsa_seqs
         # Host metadata and data_ptr only: never read GPU counts/positions to dispatch.
-        key=tuple((first,n,pages.data_ptr(),len(pages)) for first,n,pages in seqs)+(ctx.positions.data_ptr(),)
+        key=tuple((first,n,pages.data_ptr(),len(pages)) for first,n,pages in seqs)+(ctx.positions.data_ptr(),
+                                                                                       ctx.rope.data_ptr())
         cached=getattr(side,'qsa_prefill_plan',None)
         if cached is None or cached[0] != key:
             compression=make_compression_plan(seqs,x.device)
+            if ctx.rope_positions is not None:  # images: keys rotate by their group-first token's rope row
+                compression=dataclasses.replace(compression,positions=indexer.group_rope(ctx,seqs))
             gcap=max((first+n)//4 for first,n,_ in seqs)
             table=torch.zeros(len(seqs),gcap,device=x.device,dtype=torch.int32)
             offsets=[0];bases=[];page_offset=0
@@ -71,7 +75,7 @@ class PrefillKernels:
         aux=ctx.kv_pool.page_aux[indexer.name]
         projected=F.linear(x,indexer.qk)
         query=torch.empty(x.shape[0],4,128,device=x.device,dtype=torch.bfloat16)
-        self.query(projected,aux,token_pages.to(torch.int32).contiguous(),ctx.positions,
+        self.query(projected,aux,token_pages.to(torch.int32).contiguous(),ctx.rope,
                    indexer.q_norm,self.cos_sin,query,indexer.eps)
         self.compress(aux,compression,indexer.k_norm,self.cos_sin,indexer.eps)
         pages=torch.empty(x.shape[0],2051,device=x.device,dtype=torch.int32)

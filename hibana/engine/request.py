@@ -26,6 +26,7 @@ class Request(RequestState):
     params: SamplingParams
     request_id: int = 0
     media: tuple = ()  # the prompt's images (engine/media.Image), whose placeholder ids are in prompt_ids
+    rope: object = None  # engine/mrope.RopeLayout of `media` on an M-RoPE target, else None (rope position = index)
     state: State = State.QUEUED
     output_ids: list[int] = field(default_factory=list)
     # resources

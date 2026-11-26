@@ -93,9 +93,15 @@ class RadioVision:
     embeddings."""
 
     image_token, image_start, image_end, identity = IMAGE_TOKEN, IMAGE_START, IMAGE_END, IDENTITY
+    marker, mrope = "<image>", False
     workspace_bytes = ENCODE_BYTES
     preprocess = staticmethod(preprocess)
     tokens = staticmethod(image_tokens)
+
+    @staticmethod
+    def grid(width: int, height: int) -> tuple[int, int]:
+        w, h = target_patches(width, height)
+        return h // MERGE, w // MERGE
 
     def __init__(self, w, device: torch.device):
         def get(name: str) -> torch.Tensor:

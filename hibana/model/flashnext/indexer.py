@@ -16,6 +16,10 @@ SGLang's `qsa` package (checked in `tests/unit/test_qsa_reference.py` and
 Keys are maintained on every forward; selection runs only when some row is
 past the budget, otherwise attention stays the dense path it is equal to.
 Selection is `kernels/qsa/selection.py`: fixed shapes, so graphs replay it too.
+
+With images (`ctx.rope_positions`, engine/mrope.py) a query rotates by its
+row's rope position and a compressed key by its group's first token's, as the
+reference; grouping and selection stay on the sequence index.
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ import torch
 import torch.nn.functional as F
 
 from hibana.model.flashnext.reference import gemma_rms, rope_neox
+from hibana.model.rope import rotate
 
 
 class FlashNextIndexer:
@@ -98,24 +103,28 @@ class FlashNextIndexer:
         qk = F.linear(x, self.qk)
         aux[token_pages.long(), 0] = qk[:, h * d:]
         plan = self._plan(ctx.extras, x.device)
-        self._compress(aux, ctx.extras.qsa_seqs, x.device, x.dtype, plan)
+        self._compress(aux, ctx.extras.qsa_seqs, x.device, x.dtype, plan, ctx)
         if plan["dense"]:
             return None
         # scores and top-k in chunks of 256 rows (a bounded score buffer); the queries' norm and rotation, and the
         # selection after the top-k, for every row at once (row by row the same bits)
         # (eager prefill on SM121: the same selection from faster kernels, `kernels/qsa/score_exact.py`)
         segments = [n for _, n, _ in ctx.extras.qsa_seqs] if getattr(ctx, "mode", None) == "prefill" else None
-        return self.select(qk, ctx.positions, aux, plan["table"], plan["base"], plan["gcap"], chunk=256, segments=segments)
+        return self.select(qk, ctx.positions, aux, plan["table"], plan["base"], plan["gcap"], chunk=256, segments=segments,
+                           rope=ctx.rope_positions)
 
     def select(self, qk: torch.Tensor, positions: torch.Tensor, aux: torch.Tensor, table: torch.Tensor, base: torch.Tensor,
-               gcap: int, chunk: int | None = None, segments: list[int] | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+               gcap: int, chunk: int | None = None, segments: list[int] | None = None,
+               rope: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
         """Selection for rows at `positions` from their index projections `qk`; `base` is each
         row's offset in the flat page `table`, `gcap` the groups the widest row may see. `segments`: each sequence's
-        row count, in row order, when eager rows may take the SM121 kernels of the same selection (`score_exact.py`)."""
+        row count, in row order, when eager rows may take the SM121 kernels of the same selection (`score_exact.py`).
+        `rope`: the queries' rotary table rows where they are not `positions` (M-RoPE)."""
         from hibana.kernels.qsa.selection import select_pages
         t, h, d = qk.shape[0], self.heads, self.dim
         q = gemma_rms(qk[:, : h * d].reshape(t, h, d), self.q_norm, self.eps)
-        q = rope_neox(q, positions, self.rotary_dim, self.theta)
+        q = (rope_neox(q, positions, self.rotary_dim, self.theta) if rope is None
+             else rotate(q, self.cos_sin[rope], self.rotary_dim))
         if segments is not None:
             from hibana.kernels.qsa import score_exact
             if score_exact.supported(q, aux, self.ratio, self.budget):
@@ -135,11 +144,13 @@ class FlashNextIndexer:
             qk = self.maintain(x, ctx, token_pages)
             if not sparse:
                 return None
-            return self.select(qk, ctx.positions, aux, side.qsa_table, side.qsa_indptr[side.qsa_row_seq], side.qsa_gcap)
+            return self.select(qk, ctx.positions, aux, side.qsa_table, side.qsa_indptr[side.qsa_row_seq], side.qsa_gcap,
+                               rope=ctx.rope_positions)
         qk = F.linear(x, self.qk)
-        prepped = decode_prep.prep(qk, aux, token_pages, ctx.positions, self.q_norm, cos_sin, self.heads, self.eps, sparse,
+        # decode and verification rows are text: the kernels' group key at `rope - 3` is the group-first token's row
+        prepped = decode_prep.prep(qk, aux, token_pages, ctx.rope, self.q_norm, cos_sin, self.heads, self.eps, sparse,
                                    side.qsa_indptr, side.qsa_row_seq)
-        decode_prep.compress(aux, side.qsa_members, side.qsa_writes, ctx.positions, self.k_norm, cos_sin, self.eps)
+        decode_prep.compress(aux, side.qsa_members, side.qsa_writes, ctx.rope, self.k_norm, cos_sin, self.eps)
         if not sparse:
             return None
         from hibana.kernels.qsa.selection import select_pages
@@ -158,7 +169,7 @@ class FlashNextIndexer:
         side = ctx.extras
         keys = aux[side.qsa_members.long(), 0].float().mean(dim=1).to(x.dtype)
         keys = gemma_rms(keys.unsqueeze(1), self.k_norm, self.eps)
-        first = (ctx.positions - (self.ratio - 1)).clamp_min(0)
+        first = (ctx.rope - (self.ratio - 1)).clamp_min(0)
         aux[side.qsa_writes.long(), 1] = rope_neox(keys, first, self.rotary_dim, self.theta)[:, 0]
         return qk
 
@@ -233,7 +244,17 @@ class FlashNextIndexer:
         return {"members": pages[torch.from_numpy(index).to(device)].long(),
                 "first": torch.from_numpy(np.concatenate(ends) - (r - 1)).to(device)}
 
-    def _compress(self, aux, seqs, device, dtype, groups: dict | None = None) -> None:
+    def group_rope(self, ctx, seqs) -> torch.Tensor:
+        """With images: the rotary row of each completed group's first token, in `_groups` order."""
+        from hibana.engine.upload import upload
+        r, row0, rows = self.ratio, 0, []
+        for first, n, _ in seqs:
+            rows += range(row0 + (r - 1 - first) % r, row0 + n, r)
+            row0 += n
+        rows = upload(rows, torch.int64, ctx.rope_positions.device)
+        return ctx.rope_first[rows] if ctx.rope_first is not None else ctx.rope_positions[rows] - (r - 1)
+
+    def _compress(self, aux, seqs, device, dtype, groups: dict | None = None, ctx=None) -> None:
         """Write the compressed key of every group the sequences' new tokens complete; `groups`: `_groups(seqs)`."""
         groups = groups if groups is not None else self._groups(seqs, device)
         members = groups["members"]
@@ -241,4 +262,8 @@ class FlashNextIndexer:
             return
         keys = aux[members, 0].float().mean(dim=1).to(dtype)  # FP32 mean, stored in the activation dtype
         keys = gemma_rms(keys.unsqueeze(1), self.k_norm, self.eps)
-        aux[members[:, -1], 1] = rope_neox(keys, groups["first"], self.rotary_dim, self.theta)[:, 0]
+        if ctx is not None and ctx.rope_positions is not None:
+            keys = rotate(keys, self.cos_sin[self.group_rope(ctx, seqs)], self.rotary_dim)
+        else:
+            keys = rope_neox(keys, groups["first"], self.rotary_dim, self.theta)
+        aux[members[:, -1], 1] = keys[:, 0]
