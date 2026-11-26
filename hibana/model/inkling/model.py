@@ -65,12 +65,13 @@ class MessageGate:
         self.down = w.get(f"{prefix}.down_weight").to(device)  # [rank, 2H] BF16
         self.forget16 = w.get(f"{prefix}.forget_weight").to(device)  # [H, rank] BF16, computed with in FP32
         self.gain16 = w.get(f"{prefix}.gain_weight").to(device)
-        self.forget, self.gain = self.forget16.float(), self.gain16.float()
 
     def __call__(self, hidden: torch.Tensor, message: torch.Tensor) -> torch.Tensor:
+        """The PyTorch reference (`Layer.forward`); serving runs the stacked gates' kernels."""
         pair = torch.cat([rms(hidden), rms(message)], dim=-1).to(self.down.dtype)
         low = F.linear(pair, self.down).float()
-        return (1 - torch.tanh(F.linear(low, self.forget))) * hidden + torch.tanh(F.linear(low, self.gain)) * message
+        return ((1 - torch.tanh(F.linear(low, self.forget16.float()))) * hidden
+                + torch.tanh(F.linear(low, self.gain16.float())) * message)
 
 
 class Layer:
@@ -94,7 +95,11 @@ class Layer:
         if c.LOOP_START <= index < c.LOOP_END:  # the query, key, value and MLP inputs' message gates
             self.gates = [MessageGate(w, f"{p}.controllers.{name}", device) for name in ("attn", "k", "v", "mlp")]
             # the four stacked, as the gate kernels read them (decode's `kernels.mix`, prefill's `prefill.gate`)
-            self.gate_stack = tuple(torch.stack([getattr(g, name) for g in self.gates]).contiguous() for name in ("down", "forget16", "gain16"))
+            names = ("down", "forget16", "gain16")
+            self.gate_stack = tuple(torch.stack([getattr(g, name) for g in self.gates]).contiguous() for name in names)
+            for i, g in enumerate(self.gates):  # each gate reads its row of the stack: one copy of the weights
+                for name, stacked in zip(names, self.gate_stack):
+                    setattr(g, name, stacked[i])
 
     def gate(self, x: torch.Tensor, message: torch.Tensor, first: int, weight: torch.Tensor) -> torch.Tensor:
         """Prefill's message gates `first` .. `first + G` on FP32 inputs: message [G, T, H]; x [G, T, H], or [1, T, H]
