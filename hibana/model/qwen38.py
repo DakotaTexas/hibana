@@ -21,6 +21,7 @@ from hibana.distributed import all_gather, all_reduce, div_even, get_tp_info
 from hibana.kernels import ops
 from hibana.model.attention import Attention
 from hibana.model.gdn import GatedDeltaNet
+from hibana.model import qwen_vision
 from hibana.model.mlp import Mlp
 from hibana.model.norm import GemmaRMSNorm
 from hibana.model.rope import PartialRotary
@@ -90,7 +91,8 @@ class Qwen38:
         if current().w3_checkpoint and not w3.enabled():
             raise ValueError("HIBANA_W3_CHECKPOINT requires HIBANA_W3_DECODE=1")
         tp = get_tp_info()
-        check_load_headroom(target.weight_load_peak_bytes)
+        vision = current().vision
+        check_load_headroom(target.weight_load_peak_bytes + (qwen_vision.VISION_BYTES if vision else 0))
         self.device = torch.device(device)
         cfg = target.load_model_config(snap)
         types = target.layer_types_of(cfg)
@@ -106,6 +108,7 @@ class Qwen38:
             target.rope_theta,
             target.max_position_embeddings,
             self.device,
+            mrope_section=qwen_vision.mrope_section(cfg) if vision else None,
         )
         self.ragged = ops.RaggedAttention(self.device, target.num_attention_heads, target.num_kv_heads, target.head_dim)
         self.layers: list[DecoderLayer] = []
@@ -121,6 +124,7 @@ class Qwen38:
         self.final_norm = GemmaRMSNorm(w.get(f"{PREFIX}.norm.weight").to(self.device), target.rms_norm_eps)
         # Vocabulary-parallel: each rank scores its rows of the vocabulary and `logits` gathers them.
         self.lm_head = load_nvfp4_linear(w, ["lm_head"], self.device, ColumnParallel((div_even(target.vocab_size, tp.size),)))
+        self.vision = qwen_vision.load(w, self.device, cfg, current().vision_max_pixels, log) if vision else None
         w.close()
         torch.cuda.synchronize()
         if log:
@@ -152,6 +156,8 @@ class Qwen38:
         if ctx.mode == "prefill":
             prepare_gdn_prefill(ctx, len(input_ids), input_ids.device)
         hidden = torch.nn.functional.embedding(input_ids, self.embed)
+        if ctx.media_rows is not None:
+            hidden.index_copy_(0, ctx.media_rows, ctx.media_embeds)
         ctx.capture = capture
         out: dict = {"input_ids": input_ids, "positions": ctx.positions}
         if capture:

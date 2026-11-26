@@ -83,6 +83,21 @@ def test_round_trip_across_a_restart(tmp_path):
         assert tensors[name].dtype == t.dtype and tensors[name].shape == t.shape and same(tensors[name], t)
 
 
+def test_image_placeholder_ids_survive_a_restart(tmp_path):
+    """An image's placeholder ids are negative int32s (engine/media.placeholder_ids): a block holding them is listed and
+    read back after a restart like any other."""
+    from hibana.engine.media import placeholder_ids
+    store = SsdStore(tmp_path, IDENTITY)
+    tokens = [7] * 6 + list(placeholder_ids(b"img" * 11, BLOCK - 12)) + [9] * 6
+    key = block_hash(store.root, tokens)
+    segs = segments()
+    put(store, header("kv", key, store.root, 0, tokens, segs), segs)
+    (listed, _), = list(SsdStore(tmp_path, IDENTITY).scan())
+    assert listed.key == key.hex() and listed.tokens == tokens and min(tokens) < 0
+    got, _ = read(SsdStore(tmp_path, IDENTITY), "kv", key.hex())
+    assert got.tokens == tokens
+
+
 def test_o_direct_writes_and_buffered_writes_make_the_same_file(tmp_path, monkeypatch):
     """Through an O_DIRECT buffer smaller than the object, and through the page cache where the filesystem refuses
     O_DIRECT: byte for byte the same file, and it reads back."""

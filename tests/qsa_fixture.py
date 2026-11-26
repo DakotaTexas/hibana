@@ -11,6 +11,12 @@ from hibana.model.rope import PartialRotary
 from hibana.target import FLASHNEXT
 
 
+class TextCtx(SimpleNamespace):
+    """A text-only forward context: the indexer reads `rope_positions`, `rope_first` and `rope` (engine/context.py)."""
+    rope_positions = rope_first = None
+    rope = property(lambda self: self.positions)
+
+
 class QsaFixture:
     """Actual module/head geometry with small synthetic projection weights."""
     def __init__(self,batch=1,length=8192,prefix=0,*,seed=937,hidden=None,budget=None):
@@ -57,7 +63,7 @@ class QsaFixture:
         self.x=rand((self.rows,hidden))
         positions=torch.arange(prefix,self.total,device=dev,dtype=torch.int64).repeat(batch)
         self.seqs=[(prefix,length,p) for p in self.seq_pages]
-        self.ctx=SimpleNamespace(mode="prefill",positions=positions,pages=self.token_pages,
+        self.ctx=TextCtx(mode="prefill",positions=positions,pages=self.token_pages,
                                  kv_pool=self.pool,extras=SimpleNamespace(qsa_seqs=self.seqs))
         self.aux=self.pool.page_aux[ix.name]
         if prefix:

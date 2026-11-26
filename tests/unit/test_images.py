@@ -58,7 +58,7 @@ def test_check_accepts_matching_spans_and_rejects_the_rest():
 class FakeVision:
     """An encoder whose n-th encode returns rows 100 * n + i, and whose input is the image's decoded height."""
 
-    image_token, image_start, image_end, identity, workspace_bytes = 18, 19, 20, b"fake\n", 0
+    image_token, image_start, image_end, identity, workspace_bytes, marker, mrope = 18, 19, 20, b"fake\n", 0, "<image>", False
 
     def __init__(self):
         self.preprocessed, self.encoded = [], []
@@ -172,8 +172,10 @@ def animated_gif() -> bytes:
 
 @pytest.mark.parametrize("raw", [encoded(5, 3), encoded(5, 3, "RGBA"), encoded(7, 2, "LA"), encoded(9, 4, "P"),
                                  encoded(3, 8, "L", "JPEG"), encoded(6, 5, "CMYK", "JPEG"), encoded(11, 6, fmt="WEBP"),
+                                 encoded(4, 7, fmt="BMP"), encoded(6, 3, fmt="TIFF"),
                                  animated_gif(), *(oriented_jpeg(o) for o in range(1, 9))],
-                         ids=["rgb", "rgba", "la", "palette", "gray-jpeg", "cmyk-jpeg", "webp", "gif"] + [f"exif-{o}" for o in range(1, 9)])
+                         ids=["rgb", "rgba", "la", "palette", "gray-jpeg", "cmyk-jpeg", "webp", "bmp", "tiff", "gif"]
+                         + [f"exif-{o}" for o in range(1, 9)])
 def test_the_header_size_is_the_decoded_size(raw):
     width, height = media.size(raw)
     rgb = media.decode(raw)
@@ -187,8 +189,17 @@ def test_exif_orientation_is_applied():
     assert upright[0, 0].min() > 200 and turned[0, -1].min() > 200 and turned[0, 0].max() < 220
 
 
+def test_transparency_is_composited_over_white():
+    """As vLLM's image loading: a transparent pixel is white, a half-transparent one half the way to white."""
+    rgb = media.decode(encoded(5, 3, "RGBA"))  # (200, 30, 30) at alpha 128
+    assert rgb[0, 0].tolist() == [227, 142, 142]
+    clear = media.decode(encoded(5, 3, "LA"))  # gray 90 at alpha 128
+    assert clear[0, 0].tolist() == [172, 172, 172]
+
+
 def test_what_is_not_an_image_is_refused(monkeypatch):
-    for raw, why in [(b"not an image", "not a readable image"), (encoded(5, 3, fmt="BMP"), "PNG, JPEG, WebP or GIF")]:
+    eps = b"%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 5 3\n"  # a format Pillow reads and the allowlist refuses
+    for raw, why in [(b"not an image", "not a readable image"), (eps, "unknown or refused format")]:
         with pytest.raises(ValueError, match=re.escape(why)):
             media.size(raw)
     truncated = encoded(64, 64)[:-30]  # a header that reads, pixels that do not
@@ -214,7 +225,8 @@ def test_image_bytes_from_both_apis():
             api_media.image_bytes(bad)
 
 
-VISION = SimpleNamespace(image_token=18, image_start=19, image_end=20, identity=v.IDENTITY, tokens=v.image_tokens)
+VISION = SimpleNamespace(image_token=18, image_start=19, image_end=20, identity=v.IDENTITY, tokens=v.image_tokens,
+                         grid=v.RadioVision.grid, marker="<image>", mrope=False)
 
 
 def url_part(raw: bytes) -> dict:
@@ -307,13 +319,14 @@ def render(messages, **_):
 
 def test_markers_read_only_the_templates_image_markers_as_images():
     tok = CharTokenizer()
-    messages = api_media.escape([{"role": "user", "content": [{"type": "text", "text": "a <image> b <img>"}, url_part(b"")]}])
+    messages = api_media.escape([{"role": "user", "content": [{"type": "text", "text": "a <image> b <img>"}, url_part(b"")]}],
+                                "<image>")
     rendered = render(messages)
     ids, offsets = api_media.Markers(tok, VISION).encode_with_offsets(rendered)
     assert ids.count(18) == 1 and ids[-1] == 18 and 19 not in ids  # the user's markers are their characters
     text = "".join(chr(t - 100) for t in ids[1:-1])
     assert text == "a <image> b <img>" and offsets[-1] == (len(rendered) - 7, len(rendered))
-    assert api_media.escape({"k": ["<image>", 3]}) == {"k": ["image>", 3]}
+    assert api_media.escape({"k": ["<image>", 3]}, "<image>") == {"k": ["image>", 3]}
 
 
 # ---- the chat APIs
@@ -455,6 +468,11 @@ def test_validation_accepts_an_images_span_and_nothing_else():
         executor(VISION).validate_request(prompt, params)
     with pytest.raises(InvalidRequest, match="without a vision encoder"):
         executor(None).validate_request(prompt, params, (image,))
+    ex = executor(VISION)
+    ex.mrope, ex.target.indexer_budget = True, 0  # a grid that does not match its placeholders: refused before admission
+    ex.validate_request(prompt, params, (media.Image(start=2, ids=ids, data=b"", grid=(2, 2)),))
+    with pytest.raises(InvalidRequest, match="one placeholder per block"):
+        ex.validate_request(prompt, params, (media.Image(start=2, ids=ids, data=b"", grid=(2, 3)),))
 
 
 def test_prefill_rows_and_model_ids():
@@ -473,6 +491,22 @@ def test_prefill_rows_and_model_ids():
     ex._image_rows(ctx, [(plain, 0, 3, 0)])
     assert ctx.media_rows is None
     assert ex.prefill_ready(plain, 7, wait=False) == 7
+
+
+def test_tensor_parallel_ranks_prefill_to_the_slowest_ranks_encode(monkeypatch):
+    """Without waiting, how far a chunk may go depends on this rank's encode: ranks agree on the smallest answer (a peer
+    whose image is still encoding stops everyone's chunk before it), so every rank runs the same forward."""
+    import hibana.engine.executor as executor_module
+    vision = FakeVision()
+    ex = executor(vision)
+    image = media.Image(start=4, ids=media.placeholder_ids(b"img", 3), data=encoded(4, 3))
+    req = SimpleNamespace(media=(image,), prefill_pos=0)
+    ex.images.prefetch(req.media, 0)
+    image.pixels.result()
+    assert ex.prefill_ready(req, 10, wait=False) == 10  # this rank alone: its image's pixels are ready
+    monkeypatch.setattr(executor_module, "all_reduce_min", lambda *v: [min(*v, 4)])  # a peer still encoding: stop at 4
+    assert ex.prefill_ready(req, 10, wait=False) == 4
+    assert ex.prefill_ready(req, 10, wait=True) == 10  # waiting is the same on every rank: no exchange
 
 
 def test_the_scheduler_ends_a_chunk_before_an_image_still_encoding_while_others_decode():

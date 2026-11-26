@@ -131,7 +131,7 @@ class Header:
                 or len(self.parent) != 64 or len(self.key) != 64
                 or type(self.start) is not int or self.start < 0
                 or not isinstance(self.tokens, list)
-                or any(type(t) is not int or not 0 <= t < 2**31 for t in self.tokens)
+                or any(type(t) is not int or not -2**31 <= t < 2**31 for t in self.tokens)  # images' placeholders are negative
                 or type(self.nbytes) is not int or self.nbytes < 0
                 or type(self.crc) is not int or not 0 <= self.crc < 2**32
                 or not isinstance(self.segments, list) or not isinstance(self.scalars, dict)

@@ -31,7 +31,7 @@ speculative scratch capacity.
 | `stop` | A nonempty string or list of nonempty stop strings |
 | `n` | 1 to 16 choices (non-streaming). The prompt is prefilled once by a one-token primer and published to the prefix cache; the n samples resume at its last chunk end (at most 64 tokens re-prefilled each) and decode side by side, up to the batch size at a time. With a `seed`, choice i uses seed + i; use a temperature above 0 for distinct choices |
 | `chat_template_kwargs.enable_thinking` | Thinking defaults to true; false disables it |
-| `reasoning_effort` | `low`, `medium`, `high` select the template's reasoning instruction (`low`, `medium`, `xhigh`; `high` and `max` map to `xhigh`, the default); unknown values keep the default; `chat_template_kwargs.reasoning_effort` takes precedence |
+| `reasoning_effort` | `low`, `medium`, `high` select the template's reasoning instruction (`low`, `medium`, `xhigh`; `high` and `max` map to `xhigh`, the default); unknown values keep the default; `chat_template_kwargs.reasoning_effort` takes precedence. Nemotron's templates have only `medium_effort` (`{reasoning effort: efficient}`): `low` and `medium` set it, `high` keeps full reasoning, and `chat_template_kwargs.medium_effort` takes precedence |
 | `tools` | Tool schemas passed to the template; generated calls are parsed |
 | `tool_choice` omitted/null/`auto` | Unconstrained model choice |
 | `tool_choice: "none"` | Omit tool schemas from the prompt and tool-call parsing |
@@ -60,10 +60,12 @@ prompt tokens reused from the prefix cache as
 cached tokens and speculative work when used. `/generate` and OpenAI routes
 have different response schemas.
 
-Queue saturation returns 429. An unavailable engine returns 503; a stream
-already in progress reports an SSE error. Client disconnects cancel their
-requests. Cache flush acknowledges invalidation; locked storage may remain
-until its readers finish, reported by `flush_pending`.
+Queue saturation returns 429 (`HIBANA_MAX_QUEUED` raises the queue
+limit above the profile's, at least two batches). An unavailable engine
+returns 503; a stream already in progress reports an SSE error. Client
+disconnects cancel their requests. Cache flush acknowledges invalidation;
+locked storage may remain until its readers finish, reported by
+`flush_pending`.
 
 The chat routes (`/v1/chat/completions`, `/v1/messages`) also tell the prefix cache where the prompt's last message
 starts (`SamplingParams.message_boundary`, from one more render of the conversation without it). Each prefill places
@@ -115,10 +117,11 @@ engine.
 Nemotron Super and Bolt serve their checkpoints' vision encoder (`HIBANA_VISION`, on for both; `/get_server_info`
 reports `vision`). A chat message's content can then hold images: OpenAI `image_url` parts (or `input_image`) with a
 `data:` URL, and on Messages `image` blocks with a base64 source, in user turns and in `tool_result` content (an agent's
-screenshot is read, not replaced by a note). The server fetches nothing. PNG, JPEG, WebP and GIF (its first frame)
-decode with Pillow, upright by their EXIF orientation; alpha is dropped. A 400 names the image that cannot be read: an
-`http(s)` URL, data that is not one of those formats or does not decode, more than 32 MiB encoded or 64 megapixels, an
-image so narrow that its short side gets no patch (beyond about 13,000 : 1), or more than 100 images in a request. In a
+screenshot is read, not replaced by a note). The server fetches nothing. Images decode as vLLM decodes them, pixel for
+pixel: Pillow's raster formats on vLLM's allowlist (PNG, JPEG, WebP, GIF's first frame, BMP, TIFF, AVIF and others; not
+EPS or WMF), upright by their EXIF orientation, transparency composited over white. A 400 names the image that cannot be
+read: an `http(s)` URL, data that is not one of those formats or does not decode, more than 32 MiB encoded or 64
+megapixels, an image so narrow that its short side gets no patch (beyond about 13,000 : 1), or more than 100 images in a request. In a
 tool result such an image becomes a note saying why (`[image omitted: ...]`) and the turn goes on.
 
 Each image is resized to one tile of 16-pixel patches (between 1,024 and 13,312, keeping its aspect ratio) and costs a
@@ -133,7 +136,18 @@ again: a later turn that sends the same image resumes from the cached prefix, im
 for a 1,024-patch tile, 0.7 s for a full one, on one GB10) runs on its own CUDA stream; while other requests decode, a
 prefill chunk ends before an image still encoding, so their tokens keep coming. The checkpoint's video and audio inputs
 are not served (`input_audio`, `file`, `video_url` and Messages `document` blocks are a 400, or a note inside a tool
-result). The 27B and Flash-Next refuse images; their vision towers are not loaded.
+result).
+
+The 27B and Flash-Next serve their checkpoints' vision tower with `HIBANA_VISION=1` (off by default; 0.86 GiB of BF16
+weights). An image is resized to multiples of 32 pixels between 65,536 pixels and `HIBANA_VISION_MAX_PIXELS` (default
+16,777,216, the checkpoints' own) as their processor does, and costs one prompt token per 32 x 32 pixels, plus
+`<|vision_start|>` and `<|vision_end|>`: 64 for a small image, about 2,040 for 1920 x 1080, at most 16,384. The
+template writes `<|vision_start|><|image_pad|><|vision_end|>` for each image part; those strings in a request's own text
+are read as text. Image tokens rotate by their row and column (the checkpoints' M-RoPE), so the text after an image
+continues from its larger side, not its token count; the positions follow from the images' content, so cached prefixes
+and the SSD tier resume them unchanged. An image must be followed by at least 4 prompt tokens (every template's turn
+end is). The encode takes 0.09 s for 1,024 tokens, 0.76 s for 4,096 and 9.0 s for 16,384 on one GB10; a lower
+`HIBANA_VISION_MAX_PIXELS` bounds it (and is part of each image's identity, so no cached prefix crosses a change).
 
 With thinking off the models sometimes still reason about an image and end it with `</think>`; as NVIDIA's reasoning
 parser does, everything is then content.

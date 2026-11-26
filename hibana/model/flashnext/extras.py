@@ -24,6 +24,8 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
+from hibana.engine.media import text_ids
+
 
 @dataclass
 class FlashNextSideInputs:
@@ -66,10 +68,14 @@ class FlashNextExtras:
         return "dense" if dense else "selecting"
 
     # ---- PLE rows ----
+    def _model_ids(self, req, ids: list[int]) -> list[int]:
+        """`ids` as the model reads them: an image's placeholders are the image token, which the PLE hashes."""
+        return text_ids(ids, self.model.vision.image_token) if req.media else ids
+
     def _history(self, req, start: int) -> list[int]:
         """The two tokens before absolute position `start` of the request (EOS before the sequence)."""
         full = req.prompt_ids + req.output_ids
-        return [full[i] if i >= 0 else self.eos for i in (start - 2, start - 1)]
+        return self._model_ids(req, [full[i] if i >= 0 else self.eos for i in (start - 2, start - 1)])
 
     def _decode_rows(self, reqs) -> torch.Tensor:
         """Table rows for each request's pending decode token (host gather) -> device uint8 [B, heads, row_bytes]."""
@@ -138,7 +144,7 @@ class FlashNextExtras:
             if req in self._prefetched or end >= len(req.prompt_ids):
                 continue
             self._prefetched.add(req)
-            ids = torch.tensor(req.prompt_ids[end:], dtype=torch.int64)
+            ids = torch.tensor(self._model_ids(req, req.prompt_ids[end:]), dtype=torch.int64)
             history = torch.tensor(self._history(req, end), dtype=torch.int64)
             self.ple.table.prefetch(self.ple.ngram_ids(ids, history, self.eos).numpy())
 

@@ -60,6 +60,7 @@ class DecodeGraphs:
         return {
             "tokens": torch.zeros(b, dtype=torch.int64, device=d),
             "positions": torch.zeros(b, dtype=torch.int64, device=d),
+            "rope_positions": torch.zeros(b, dtype=torch.int64, device=d) if self.ex.mrope else None,
             "slots": torch.zeros(b, dtype=torch.int32, device=d),
             "out_pages": torch.zeros(b, dtype=torch.int32, device=d),
             "indptr": torch.zeros(b + 1, dtype=torch.int32, device=d),
@@ -86,6 +87,7 @@ class DecodeGraphs:
             kv_pool=self.ex.kv_pool,
             state_pool=self.ex.state_pool,
             positions=st["positions"],
+            rope_positions=st["rope_positions"],
             slots=st["slots"],
             out_pages=st["out_pages"],
             decode_wrapper=self._wrappers[b],
@@ -131,7 +133,7 @@ class DecodeGraphs:
         return graph_set.pick(self.sizes, b)
 
     def run(self, tokens: list[int], positions: list[int], slots: list[int], out_pages: torch.Tensor, pages: list[torch.Tensor], *, return_features=False,
-            side=None, variant: str = "dense"):
+            side=None, variant: str = "dense", rope_positions: list[int] | None = None):
         """Returns logits [b, V] for the b real rows; `side` is (requests, seqs) for the model's side inputs,
         `variant` the graph to replay ("selecting": some row past Flash-Next's indexer budget)."""
         b = len(tokens)
@@ -142,6 +144,8 @@ class DecodeGraphs:
             self.ex.extras.fill(st["side"], side[0], None, side[1], b)
         st["tokens"].copy_(torch.tensor(tokens + [0] * pad, dtype=torch.int64))
         st["positions"].copy_(torch.tensor(positions + [0] * pad, dtype=torch.int64))
+        if st["rope_positions"] is not None:
+            st["rope_positions"].copy_(torch.tensor((rope_positions or positions) + [0] * pad, dtype=torch.int64))
         st["slots"].copy_(torch.tensor(slots + [0] * pad, dtype=torch.int32))
         st["out_pages"][:b].copy_(out_pages)
         if pad:

@@ -61,6 +61,7 @@ class VerifyGraphs:
         st = {
             "tokens": torch.zeros(b * s, dtype=torch.int64, device=d),
             "positions": torch.zeros(b * s, dtype=torch.int64, device=d),
+            "rope_positions": torch.zeros(b * s, dtype=torch.int64, device=d) if self.ex.mrope else None,
             "pages": torch.zeros(b * s, dtype=torch.int32, device=d),
             "slots": torch.zeros(b, dtype=torch.int32, device=d),
             "qo_indptr": torch.arange(0, b * s + 1, s, dtype=torch.int32, device=d),
@@ -73,6 +74,7 @@ class VerifyGraphs:
         st["ctx"] = ForwardContext(
             feature_request=self.spec.proposer.requirements.features,
             mode="verify", kv_pool=self.ex.kv_pool, state_pool=self.ex.state_pool, positions=st["positions"],
+            rope_positions=st["rope_positions"],
             pages=st["pages"], seq_len=b * s, cu_seqlens=st["qo_indptr"], seq_slots=st["slots"],
             seq_prefix_lens=[0] * b, seq_lens=[s] * b, verify_steps=s,
             verify_scratch=torch.arange(b, dtype=torch.int32, device=d), inter_ssm=self.spec.inter_ssm,
@@ -132,7 +134,7 @@ class VerifyGraphs:
         return graph_set.pick(self.sizes, b)
 
     def run(self, tokens: torch.Tensor, positions: torch.Tensor, pages: torch.Tensor, slots: torch.Tensor, kv_all: list[torch.Tensor], *, sampled=False,
-            side=None, variant: str = "dense"):
+            side=None, variant: str = "dense", rope_positions: torch.Tensor | None = None):
         """Returns (norm rows [b*s, H], argmax or logits [b*s(, V)], ctx, features,
         logits [b*s, V]) for the real rows; padded rows use slot 0, attend to page 0 and write the pool's padding pages.
         The logits view is overwritten by the next replay. `side` is (requests,
@@ -145,11 +147,15 @@ class VerifyGraphs:
         n = b * s
         st["tokens"][:n].copy_(tokens)
         st["positions"][:n].copy_(positions)
+        if st["rope_positions"] is not None:
+            st["rope_positions"][:n].copy_(positions if rope_positions is None else rope_positions[:n])
         st["pages"][:n].copy_(pages)
         st["slots"][:b].copy_(slots)
         if size > b:
             st["tokens"][n:].zero_()
             st["positions"][n:].zero_()
+            if st["rope_positions"] is not None:
+                st["rope_positions"][n:].zero_()
             st["pages"][n:].copy_(self.ex.kv_pool.pad_pages(size * s - n))
             st["slots"][b:].zero_()
         pad_kv = [torch.zeros(s + 1, dtype=torch.int32, device=self.device) for _ in range(size - b)]
@@ -207,6 +213,7 @@ class RaggedVerifyGraphs:
         st = {
             "tokens": torch.zeros(rows, dtype=torch.int64, device=d),
             "positions": torch.zeros(rows, dtype=torch.int64, device=d),
+            "rope_positions": torch.zeros(rows, dtype=torch.int64, device=d) if self.ex.mrope else None,
             "pages": torch.zeros(rows, dtype=torch.int32, device=d),
             "slots": torch.zeros(b, dtype=torch.int32, device=d),
             "qo_indptr": torch.zeros(b + 1, dtype=torch.int32, device=d),
@@ -221,6 +228,7 @@ class RaggedVerifyGraphs:
         st["ctx"] = ForwardContext(
             feature_request=self.spec.proposer.requirements.features,
             mode="verify", kv_pool=self.ex.kv_pool, state_pool=self.ex.state_pool, positions=st["positions"],
+            rope_positions=st["rope_positions"],
             pages=st["pages"], seq_len=rows, cu_seqlens=st["qo_indptr"], seq_slots=st["slots"],
             seq_prefix_lens=[0] * b, seq_lens=[s] * b, verify_steps=s,
             verify_scratch=torch.arange(b, dtype=torch.int32, device=d), inter_ssm=self.spec.inter_ssm,
@@ -293,7 +301,8 @@ class RaggedVerifyGraphs:
                                          generator=torch.Generator(device=self.device).manual_seed(b * 1000 + rows)))
         return graph_set.time_replay(self._graphs[b, rows], rounds)
 
-    def run(self, bucket: int, rows: int, lengths: list[int], width: int, tokens, positions, pages, slots, kv_all):
+    def run(self, bucket: int, rows: int, lengths: list[int], width: int, tokens, positions, pages, slots, kv_all,
+            rope_positions=None):
         """Replay the (bucket, rows) graph. lengths: every sequence's rows (the requests', then the bucket's padded
         ones), summing to `rows`; tokens/positions/pages [rows] packed; slots [bucket]; kv_all one page list per
         sequence. Returns the graph's outputs, views the next replay overwrites: norm, argmax and features unpacked to
@@ -301,6 +310,8 @@ class RaggedVerifyGraphs:
         st = self._st[bucket, rows]
         st["tokens"].copy_(tokens)
         st["positions"].copy_(positions)
+        if st["rope_positions"] is not None:
+            st["rope_positions"].copy_(positions if rope_positions is None else rope_positions)
         st["pages"].copy_(pages)
         st["slots"].copy_(slots)
         self._layout(st, lengths, width)

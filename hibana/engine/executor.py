@@ -18,6 +18,7 @@ from hibana.engine.graphs import DecodeGraphs
 from hibana.engine.request import Request, State
 from hibana.engine.grammar import sample_masks
 from hibana.engine.media import Encoder, check as check_media, text_ids
+from hibana.engine.mrope import NO_IMAGES, RopeLayout
 from hibana.engine.sampling_rng import request_seed
 from hibana.engine.sampler import InvalidRequest, Sampler, SamplingParams
 from hibana.cache.kv_pool import KV_DTYPE, KvPool
@@ -47,6 +48,7 @@ class Executor:
     timing = False  # benchmarks set True: synchronize to attribute prefill wall time (class attribute: test executors skip __init__)
     extras = None  # the model's forward side inputs (`forward_extras()`, e.g. Flash-Next's); class attribute for the same reason
     vision, images = None, None  # the model's image input (engine/contracts.VisionEncoder) and its `media.Encoder`, likewise
+    mrope = False  # image tokens rotate by 2-D positions (engine/mrope.py), likewise
 
     def __init__(self, model: Qwen38, num_pages: int | None = None, num_slots: int | None = None, max_batch: int = 4, use_cache: bool = True, log=None, max_context: int | None = None, spec_config=None):
         self.target: Target = model.target
@@ -65,6 +67,7 @@ class Executor:
         self.extras = model.forward_extras()  # what the model's forwards need beyond the context (None for the 27B)
         self.vision = getattr(model, "vision", None)  # optional: engine/contracts.VisionEncoder
         self.images = Encoder(self.vision, self.device) if self.vision is not None else None
+        self.mrope = self.vision is not None and self.vision.mrope
         self.ledger = Ledger(target=self.target)
         self.ledger.record_cuda_allocated("weights")
         from hibana.cache.ssm_format import SsmFormat
@@ -269,6 +272,12 @@ class Executor:
             text = check_media(prompt_ids, media) if media else prompt_ids  # every image's placeholders as 0
         except ValueError as exc:
             raise InvalidRequest(str(exc)) from None
+        if media and self.mrope:
+            if any(m.grid is None or m.grid[0] * m.grid[1] != len(m.ids) for m in media):
+                raise InvalidRequest("images for this model need their grid (rows, cols), one placeholder per block")
+            # the indexer's decode kernels rotate a group's key at the row's rope position - 3: those tokens must be text
+            if self.target.indexer_budget and len(prompt_ids) - max(m.end for m in media) < 4:
+                raise InvalidRequest("an image must be followed by at least 4 prompt tokens")
         if any(type(t) is not int or not 0 <= t < vocab for t in text):
             raise InvalidRequest(f"token IDs must be integers in [0, {vocab})")
         stops = self.target.stop_token_ids if params.stop_token_ids is None else params.stop_token_ids
@@ -296,6 +305,8 @@ class Executor:
         self.state.admit(req, req.prefill_ids)
         req.state = State.PREFILL
         if req.media:
+            if self.mrope:
+                req.rope = RopeLayout(req.media)
             self.images.prefetch(req.media, req.prefill_pos)
         return req
 
@@ -556,7 +567,8 @@ class Executor:
         (`media.Encoder.ready`), or all `n` with `wait`. The scheduler asks before each chunk."""
         if not req.media:
             return n
-        return self.images.ready(req.media, req.prefill_pos, req.prefill_pos + n, wait) - req.prefill_pos
+        ready = self.images.ready(req.media, req.prefill_pos, req.prefill_pos + n, wait) - req.prefill_pos
+        return ready if wait else all_reduce_min(ready)[0]  # depends on this rank's encode: ranks must agree
 
     def _image_rows(self, ctx: ForwardContext, spans: list[tuple[Request, int, int, int]]) -> None:
         """Set the prefill rows of `spans` [(request, start, end, its first row)] that are image placeholders and their
@@ -570,6 +582,29 @@ class Executor:
         if rows:
             ctx.media_rows = upload(rows, torch.int64, self.device)
             ctx.media_embeds = torch.cat(pieces)
+        if self.mrope and any(req.rope is not None for req, _, _, _ in spans):
+            # with an indexer, also the rotary row of each row's group-first token (index - (ratio - 1))
+            rope = self.model.rope
+            back = self.target.indexer_compress_ratio - 1 if self.target.indexer_budget else 0
+            scratch: list[tuple[int, int, int]] = []
+            table, first = [], []
+            for req, start, end, _ in spans:
+                lo = max(start - back, 0)
+                rows = (req.rope or NO_IMAGES).rows(lo, end, rope.max_positions, scratch)
+                table += rows[start - lo:]
+                if back:
+                    pad = min(back - (start - lo), end - start)
+                    first += [0] * pad + rows[:end - start - pad]
+            rope.write_scratch(scratch)
+            ctx.rope_positions = upload(table, torch.int64, self.device)
+            if back:
+                ctx.rope_first = upload(first, torch.int64, self.device)
+
+    def _rope_positions(self, reqs: list[Request], positions: list[int]) -> list[int] | None:
+        """Decode rows' rotary rows: `positions` plus each request's image delta; None when no request has images."""
+        if not any(r.rope is not None for r in reqs):
+            return None
+        return [p + (r.rope.delta if r.rope is not None else 0) for r, p in zip(reqs, positions)]
 
     def _prepare_single_prefill(self, req: Request, max_tokens: int | None) -> PrefillBatch:
         """Prefill up to `max_tokens` of the remaining prompt (all of it by
@@ -812,27 +847,31 @@ class Executor:
         step_pages = [self.state.step_pages(r) for r in reqs]
         seqs = [(r.context_len - 1, 1, pages) for r, pages in zip(reqs, step_pages)]
         variant = self.variant(seqs)
+        positions = [r.context_len - 1 for r in reqs]
+        rope_positions = self._rope_positions(reqs, positions)
         if self.use_graphs and self.graphs is not None and variant in self.graphs.variants:
             result = self.graphs.run(
                 [r.output_ids[-1] for r in reqs],
-                [r.context_len - 1 for r in reqs],
+                positions,
                 [r.slot for r in reqs],
                 new_pages,
                 step_pages,
                 return_features=self.spec is not None,
                 side=(reqs, seqs),
                 variant=variant,
+                rope_positions=rope_positions,
             )
             if self.spec is not None:
                 logits, out = result
             else:
                 logits = result
         else:
-            positions = upload([r.context_len - 1 for r in reqs], torch.int64, self.device)
             tokens = upload([r.output_ids[-1] for r in reqs], torch.int64, self.device)
             self._plan_decode(reqs, step_pages)
             ctx = ForwardContext(
-                mode="decode", kv_pool=self.kv_pool, state_pool=self.state_pool, positions=positions,
+                mode="decode", kv_pool=self.kv_pool, state_pool=self.state_pool,
+                positions=upload(positions, torch.int64, self.device),
+                rope_positions=upload(rope_positions, torch.int64, self.device) if rope_positions is not None else None,
                 slots=upload([r.slot for r in reqs], torch.int32, self.device),
                 out_pages=new_pages, decode_wrapper=self._decode_wrapper, batch_size=len(reqs),
             )

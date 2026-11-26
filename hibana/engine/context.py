@@ -24,7 +24,11 @@ class ForwardContext:
     mode: str  # "prefill" | "decode" | "verify"
     kv_pool: KvPool | None
     state_pool: StatePool | None
-    positions: torch.Tensor  # [T] prefill or [B] decode, int64
+    positions: torch.Tensor  # [T] prefill or [B] decode, int64: the sequence index
+    # rows' rotary table rows where they differ from `positions` (images, engine/mrope.py), and for Flash-Next's indexer
+    # each row's group-first token's (prefill only; decode rows' are `rope_positions - 3`)
+    rope_positions: torch.Tensor | None = None
+    rope_first: torch.Tensor | None = None
     # prefill
     slot: int = 0
     pages: torch.Tensor | None = None  # [T] int32, KV write location for each new token
@@ -72,6 +76,10 @@ class ForwardContext:
     @property
     def batched(self) -> bool:
         return self.cu_seqlens is not None
+
+    @property
+    def rope(self) -> torch.Tensor:
+        return self.positions if self.rope_positions is None else self.rope_positions
     # decode
     slots: torch.Tensor | None = None  # [B] int32 committed state slot per row
     out_pages: torch.Tensor | None = None  # [B] int32 KV write location for the new token

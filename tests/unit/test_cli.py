@@ -182,11 +182,16 @@ def test_service_start_composes_systemd_run(home, monkeypatch, tmp_path):
     log = tmp_path / "logs" / "unit.log"
     log.parent.mkdir()
     log.write_text("old run")
+    monkeypatch.setenv("TRITON_CACHE_DIR", "/data/triton")
+    monkeypatch.setenv("XDG_CACHE_HOME", "/data/xdg")
+    monkeypatch.setenv("DISPLAY", ":0")
     service.start("hibana-x", ["serve", "27b"], log, "Hibana test")
     cmd = calls[-1]
     assert cmd[:2] == ["systemd-run", "--user"] and cmd[cmd.index("--unit") + 1] == "hibana-x"
     assert cmd[-5:] == [sys.executable, "-m", "hibana", "serve", "27b"]
     assert f"StandardOutput=append:{log}" in cmd and f"HIBANA_RESULTS={home / 'results'}" in cmd
+    assert "TRITON_CACHE_DIR=/data/triton" in cmd and "XDG_CACHE_HOME=/data/xdg" in cmd  # as a foreground serve sees
+    assert not any(a.startswith("DISPLAY=") for a in cmd)
     assert (tmp_path / "logs" / "unit.log.1").read_text() == "old run"
 
 
@@ -278,3 +283,16 @@ def test_rank0_gets_the_resolved_settings_not_the_callers(monkeypatch):
     tp.Pair("peer-host", {"HIBANA_SPEC": "4", "HIBANA_TARGET": "qwen38"}, "hibana", ["engine"]).start()
     (_, rank1_env), (_, rank0_env) = started
     assert "HIBANA_TRACES" not in rank0_env and rank0_env["HIBANA_SPEC"] == "4" and rank0_env["HOME_MARKER"] == "kept"
+
+
+def test_the_peer_copy_resolves_links_out_of_each_directory(monkeypatch):
+    """A cache whose blobs link outside the model's directory reaches the peer as files: rsync copies links that leave
+    the transfer root, which the trailing slash makes the directory itself."""
+    from pathlib import Path
+    from hibana.launch import tp
+    calls = []
+    monkeypatch.setattr(tp, "ssh", lambda host, cmd, **kw: calls.append(("ssh", host, cmd)))
+    monkeypatch.setattr(tp, "run", lambda cmd, **kw: calls.append(("run", *cmd)))
+    tp.copy("peer", [Path("/cache/hub/models--org--m")], log=lambda *_: None)
+    assert calls == [("ssh", "peer", "mkdir -p /cache/hub/models--org--m"),
+                     ("run", "rsync", "-a", "--copy-unsafe-links", "/cache/hub/models--org--m/", "peer:/cache/hub/models--org--m/")]

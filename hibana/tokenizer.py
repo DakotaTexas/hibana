@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 from pathlib import Path
 
 from tokenizers import Tokenizer
@@ -24,7 +25,11 @@ class SnapshotTokenizer:
     def without_specials(self, ids: set[int]) -> SnapshotTokenizer:
         """This tokenizer with the added tokens `ids` matched in text no more: their strings encode as text."""
         spec = json.loads(self._tok.to_str())
-        spec["added_tokens"] = [t for t in spec["added_tokens"] if t["id"] not in ids]
+        # keep each entry, with content no text holds: dropping one renumbers the added tokens after it. Random, since
+        # the renamed entry still matches: a request that knew it could write the hidden token.
+        for t in spec["added_tokens"]:
+            if t["id"] in ids:
+                t["content"] = f"\x00hibana-unmatched-{secrets.token_hex(16)}\x00"
         out = SnapshotTokenizer.__new__(SnapshotTokenizer)
         out._tok = Tokenizer.from_str(json.dumps(spec))
         return out

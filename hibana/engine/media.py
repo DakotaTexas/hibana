@@ -27,11 +27,17 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-FORMATS = ("PNG", "JPEG", "WEBP", "GIF")
-MAX_IMAGE_PIXELS = 64_000_000  # a decoded image (the encoder resizes it to at most 13,312 patches, 3.4 MP)
+# Decoding follows vLLM's (`vllm/multimodal/image.py`), so a request reads the same pixels on both servers: its Pillow
+# allowlist, EXIF orientation and transparency over white.
+FORMATS = ("AVIF", "BLP", "BMP", "CUR", "DCX", "DDS", "DIB", "FITS", "FLI", "FTEX", "GBR", "GIF", "ICNS", "ICO", "IM",
+           "IMT", "IPTC", "JPEG", "JPEG2000", "MCIDAS", "MSP", "PCD", "PCX", "PIXAR", "PNG", "PPM", "PSD", "QOI", "SGI",
+           "SPIDER", "SUN", "TGA", "TIFF", "WEBP", "XBM", "XPM", "XVTHUMB")
+# A decoded image (the encoders resize it to at most 16.7 MP); vLLM's 179 MP costs ~1.8 GB of host memory a decode.
+MAX_IMAGE_PIXELS = 64_000_000
 # EXIF orientations and the transposes that undo them (Pillow's `ImageOps.exif_transpose`)
 _TRANSPOSE = {2: "FLIP_LEFT_RIGHT", 3: "ROTATE_180", 4: "FLIP_TOP_BOTTOM", 5: "TRANSPOSE", 6: "ROTATE_270",
               7: "TRANSVERSE", 8: "ROTATE_90"}
+BACKGROUND = (255, 255, 255)
 
 
 @dataclass(eq=False)
@@ -42,6 +48,7 @@ class Image:
     pixels: Future | None = None  # the encoder's input, being made on the worker thread
     embeds: torch.Tensor | None = None  # [len(ids), hidden], from its encode until its span is prefilled
     encoded: torch.cuda.Event | None = None  # recorded on the side stream after the encode, until a prefill waits on it
+    grid: tuple[int, int] | None = None  # (rows, cols) of its embeddings
 
     @property
     def end(self) -> int:
@@ -53,15 +60,27 @@ def _open(raw: bytes):
     from PIL import Image as PILImage, UnidentifiedImageError
     try:
         img = PILImage.open(io.BytesIO(raw), formats=FORMATS)
-        orientation = img.getexif().get(0x0112, 1) if "exif" in img.info else 1
+        orientation = _orientation(img)
     except UnidentifiedImageError:
-        raise ValueError("not a readable image (PNG, JPEG, WebP or GIF)") from None
-    except (OSError, ValueError, SyntaxError, PILImage.DecompressionBombError) as exc:
+        raise ValueError("not a readable image (an unknown or refused format)") from None
+    except Exception as exc:  # noqa: BLE001 - the allowlist's rarer plugins raise struct.error, KeyError and others
         raise ValueError(f"not a readable image ({exc})") from None
     if img.width * img.height > MAX_IMAGE_PIXELS:
         img.close()
         raise ValueError(f"the image has more than {MAX_IMAGE_PIXELS:,} pixels")
     return img, orientation
+
+
+def _orientation(img) -> int:
+    """The EXIF orientation still to apply, stored before the pixel data; 1 when missing or unreadable. Pillow's base
+    `getexif`: PNG's override decodes every pixel to look for an eXIf chunk after them (92 ms for a 4000 x 4000 PNG)."""
+    from PIL import Image as PILImage
+    if img.format == "TIFF":  # Pillow reports a TIFF's upright size and rotates its pixels as it loads them
+        return 1
+    try:
+        return PILImage.Image.getexif(img).get(0x0112, 1)
+    except Exception:  # noqa: BLE001 - a truncated file: `decode` refuses its pixels
+        return 1
 
 
 def size(raw: bytes) -> tuple[int, int]:
@@ -72,16 +91,24 @@ def size(raw: bytes) -> tuple[int, int]:
 
 
 def decode(raw: bytes) -> np.ndarray:
-    """The image as RGB [H, W, 3] uint8: upright by its EXIF orientation, the first frame of an animation, alpha dropped
-    (as the reference processor's RGB conversion); ValueError if it does not decode."""
+    """The image as RGB [H, W, 3] uint8: upright by its EXIF orientation, the first frame of an animation, transparency
+    composited over white (bitwise as vLLM); ValueError if it does not decode."""
     from PIL import Image as PILImage
     img, orientation = _open(raw)
     with img:
         try:
+            # the transpose `exif_transpose` makes, by the orientation `size` read, so the two always agree
             if orientation in _TRANSPOSE:
                 img = img.transpose(getattr(PILImage.Transpose, _TRANSPOSE[orientation]))
-            return np.array(img if img.mode == "RGB" else img.convert("RGB"), dtype=np.uint8)  # writable, for torch
-        except (OSError, ValueError, SyntaxError) as exc:
+            img.load()
+            if img.mode in ("RGBA", "LA", "PA") or "transparency" in img.info:
+                rgba = img if img.mode == "RGBA" else img.convert("RGBA")
+                rgb = PILImage.new("RGB", rgba.size, BACKGROUND)
+                rgb.paste(rgba, mask=rgba.split()[3])
+            else:
+                rgb = img if img.mode == "RGB" else img.convert("RGB")
+            return np.array(rgb, dtype=np.uint8)  # writable, for torch
+        except Exception as exc:  # noqa: BLE001 - as in `_open`
             raise ValueError(f"not a readable image ({exc})") from None
 
 

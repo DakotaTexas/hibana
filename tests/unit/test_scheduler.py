@@ -327,3 +327,10 @@ def test_a_long_prefill_still_advances_under_a_stream_of_short_prompts():
         gaps.append(run_)
     assert max(gaps) <= 2 * sched.cfg.prefill_max_waits, gaps
     assert long.prefill_done, long.prefill_pos
+
+
+def test_server_queue_depth_takes_largest_of_profile_two_batches_and_setting():
+    from hibana.api.server import _queue_depth
+    assert _queue_depth(16, 4, 0) == 16
+    assert _queue_depth(16, 16, 0) == 32
+    assert _queue_depth(16, 4, 4096) == 4096

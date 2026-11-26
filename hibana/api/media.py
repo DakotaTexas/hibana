@@ -7,10 +7,10 @@ sets its placeholder count, and keeps the encoded bytes; the engine decodes an i
 (engine/media.py), so an image in a cached prefix is never decoded again. A request's new image is decoded once here
 as well, so that one that does not decode is a 400 (or, in a tool result, a note) rather than a failed engine step.
 
-The template writes `<image>` for each image part. `escape` keeps the same text in a message from counting as one (the
-template would then place no image itself), and `Markers` encodes the render with only the template's `<image>` as the
-image token: user text reads as text. `expand` replaces each marker with `<img>`, the image's placeholder ids and
-`</img>`, as the checkpoint's processor expands it, and returns the images for the engine.
+The template writes the encoder's `marker` for each image part. `escape` keeps the same text in a message from counting
+as one, and `Markers` encodes the render with each marker as the image token and the rest as text. `expand` replaces each
+such token with the image start, its placeholder ids and the image end, as the checkpoints' processors do, and returns
+the images (with their grids) for the engine.
 """
 
 from __future__ import annotations
@@ -27,8 +27,6 @@ from hibana.engine.sampler import InvalidRequest
 IMAGE_PARTS = ("image_url", "input_image", "image")
 MAX_IMAGE_BYTES = 32 * 2**20  # an encoded image
 MAX_IMAGES = 100  # in one request (Anthropic's limit); their tokens are bounded by the context
-MARKER = "<image>"  # what the template writes for an image part
-_ESCAPED = "image>"  # a "<image>" of the request's own text while it is rendered (a private-use character for "<")
 _DECODED: dict[bytes, None] = {}  # digests of images that decoded here: a repeat is not decoded again to check it
 
 
@@ -37,6 +35,7 @@ class Prepared:
     digest: bytes  # SHA-256 of the encoder's identity and the encoded bytes
     tokens: int  # the embeddings it becomes
     data: bytes  # the encoded image
+    grid: tuple[int, int] | None = None  # (rows, cols) of embeddings
 
 
 def image_bytes(part: dict) -> bytes:
@@ -74,13 +73,14 @@ def _read(part: dict, vision, seen: dict[bytes, Prepared], decode: bool) -> Prep
     raw = image_bytes(part)
     digest = hashlib.sha256(vision.identity + raw).digest()
     if digest not in seen:
-        tokens = vision.tokens(*media.size(raw))
+        width, height = media.size(raw)
+        grid, tokens = vision.grid(width, height), vision.tokens(width, height)
         if decode and digest not in _DECODED:
             media.decode(raw)
             if len(_DECODED) >= 4096:
                 _DECODED.clear()
             _DECODED[digest] = None
-        seen[digest] = Prepared(digest, tokens, raw)
+        seen[digest] = Prepared(digest, tokens, raw, grid)
     return seen[digest]
 
 
@@ -113,34 +113,40 @@ def prepare(messages: list[dict], vision, decode: bool = True) -> tuple[list[dic
     return out, images
 
 
-def escape(value):
-    """`value` (messages or tools, at any nesting) with "<image>" in its strings escaped for the render."""
+def _escaped(marker: str) -> str:
+    """The marker in the request's own text while rendered: a private-use character for its "<"."""
+    return "\ue000" + marker[1:]
+
+
+def escape(value, marker: str):
+    """`value` (messages or tools, at any nesting) with the image marker in its strings escaped for the render."""
     if isinstance(value, str):
-        return value.replace(MARKER, _ESCAPED)
+        return value.replace(marker, _escaped(marker))
     if isinstance(value, list):
-        return [escape(v) for v in value]
+        return [escape(v, marker) for v in value]
     if isinstance(value, dict):
-        return {k: escape(v) for k, v in value.items()}
+        return {k: escape(v, marker) for k, v in value.items()}
     return value
 
 
 class Markers:
-    """`tok` for a render of escaped messages: each `<image>` the template wrote is the image token, and the rest,
-    the escapes undone, is encoded with the image tokens read as text (`<image>`, `<img>` and `</img>` in a message are
-    its text). Offsets are the render's (an escape has the length of what it stands for)."""
+    """`tok` for a render of escaped messages: each marker the template wrote is the image token, and the rest, the
+    escapes undone, is encoded with the image tokens read as text. Offsets are the render's."""
 
     def __init__(self, tok, vision):
         self.image_token = vision.image_token
+        self.marker = vision.marker
         self.text = tok.without_specials({vision.image_token, vision.image_start, vision.image_end})
 
     def encode_with_offsets(self, text: str) -> tuple[list[int], list[tuple[int, int]]]:
         ids, offsets, at = [], [], 0
-        for k, piece in enumerate(text.split(MARKER)):
+        marker = self.marker
+        for k, piece in enumerate(text.split(marker)):
             if k:
                 ids.append(self.image_token)
-                offsets.append((at, at + len(MARKER)))
-                at += len(MARKER)
-            piece_ids, piece_offsets = self.text.encode_with_offsets(piece.replace(_ESCAPED, MARKER))
+                offsets.append((at, at + len(marker)))
+                at += len(marker)
+            piece_ids, piece_offsets = self.text.encode_with_offsets(piece.replace(_escaped(marker), marker))
             ids += piece_ids
             offsets += [(a + at, b + at) for a, b in piece_offsets]
             at += len(piece)
@@ -162,7 +168,8 @@ def expand(ids: list[int], boundary: int, images: list[Prepared], vision) -> tup
     for mark, image in zip(marks, images):
         out += ids[last:mark]
         out.append(vision.image_start)
-        engine_images.append(media.Image(start=len(out), ids=media.placeholder_ids(image.digest, image.tokens), data=image.data))
+        engine_images.append(media.Image(start=len(out), ids=media.placeholder_ids(image.digest, image.tokens), data=image.data,
+                                         grid=image.grid))
         out += engine_images[-1].ids
         out.append(vision.image_end)
         last = mark + 1

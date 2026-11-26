@@ -15,6 +15,7 @@ from hibana.engine.context import ForwardContext
 from hibana.engine.request import Request
 from hibana.engine.contracts import Proposer, StepInputs, VerifiedFeatures
 from hibana.engine.debug import debug_sync
+from hibana.engine.upload import upload
 from hibana.engine.depth import RowBudget
 from hibana.distributed import all_reduce_max, get_tp_info
 from hibana.engine import graph_set, sampling_rng
@@ -43,6 +44,7 @@ class Verification:
     # None without relaxed requests), the bucket's slots and every sequence's KV pages, padded sequences included.
     ragged: tuple | None = None
     slots_all: torch.Tensor | None = None
+    rope_positions: torch.Tensor | None = None  # positions plus each request's image delta (engine/mrope.py)
     kv_all: list | None = None
 
 
@@ -363,7 +365,17 @@ class SpecDecoder:
             kv_all.append(ex.state.step_pages(r)[:r.committed_len + s_len])
             kv_indptr.append(kv_indptr[-1] + kv_all[-1].shape[0])
         return Verification(list(reqs), proposal, sampled, tokens_v, positions, new_pages_flat,
-                            slots_t, kv_all, t0, t1, drafted_host)
+                            slots_t, kv_all, t0, t1, drafted_host,
+                            rope_positions=self._rope(positions, reqs, [s_len] * len(reqs)))
+
+    def _rope(self, positions: torch.Tensor, reqs, rows: list[int]) -> torch.Tensor | None:
+        """`positions` (each request's `rows`, then padding) plus each request's image delta; None without images."""
+        deltas = [r.rope.delta if r.rope is not None else 0 for r in reqs]
+        if not any(deltas):
+            return None
+        shift = torch.repeat_interleave(upload(deltas, positions.dtype, self.device), upload(rows, torch.int64, self.device),
+                                        output_size=sum(rows))
+        return positions + torch.nn.functional.pad(shift, (0, positions.shape[0] - shift.shape[0]))
 
     @staticmethod
     def _drafted_host(reqs, drafts):
@@ -428,12 +440,13 @@ class SpecDecoder:
             torch.cuda.synchronize()
         t1 = time.perf_counter()
         return Verification(list(reqs), proposal, sampled, tokens, positions, pages, slots_t, kv_all[:b], t0, t1, drafted_host,
-                            ragged=(bucket, rows, lengths + padded, width, limits, cells), slots_all=slots_all, kv_all=kv_all)
+                            ragged=(bucket, rows, lengths + padded, width, limits, cells), slots_all=slots_all, kv_all=kv_all,
+                            rope_positions=self._rope(positions, reqs, lengths))
 
     def _verify_ragged(self, batch: Verification) -> None:
         bucket, rows, lengths, width, limits, cells = batch.ragged
         st = self.ragged_graphs.run(bucket, rows, lengths, width, batch.tokens, batch.positions, batch.pages,
-                                    batch.slots_all, batch.kv_all)
+                                    batch.slots_all, batch.kv_all, rope_positions=batch.rope_positions)
         reqs = batch.requests
         b = len(reqs)
         n = b * width
@@ -463,6 +476,7 @@ class SpecDecoder:
         if self.ex.use_graphs and graphs is not None and variant in graphs.variants:
             norm_rows, z_flat, ctx, layers, logits = graphs.run(batch.tokens, batch.positions, batch.pages,
                                                                batch.slots, batch.kv_pages, sampled=batch.sampled,
+                                                               rope_positions=batch.rope_positions,
                                                                side=(batch.requests, batch.proposal.tokens, seqs, batch.proposal.columns), variant=variant)
             if self._constrain(batch, logits) and not batch.sampled:
                 # The masked argmax, written into the graph's own buffer: the device acceptance graph reads it there
@@ -559,7 +573,7 @@ class SpecDecoder:
         ctx = ForwardContext(
             feature_request=self.proposer.requirements.features,
             mode="verify", kv_pool=self.ex.kv_pool, state_pool=self.ex.state_pool, positions=batch.positions,
-            pages=batch.pages, seq_len=b_sz * s_len,
+            rope_positions=batch.rope_positions, pages=batch.pages, seq_len=b_sz * s_len,
             cu_seqlens=cu_host.to(d), seq_slots=batch.slots,
             seq_prefix_lens=[r.context_len - 1 for r in batch.requests], seq_lens=[s_len] * b_sz,
             verify_steps=s_len, verify_scratch=torch.arange(b_sz, dtype=torch.int32, device=d), inter_ssm=self.inter_ssm,

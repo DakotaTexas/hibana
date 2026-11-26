@@ -43,7 +43,8 @@ missing snapshots, keeps the 3-bit checkpoint on its pinned revision, prints wha
 in its own process with the memory guard as a thread: when `MemAvailable` stays under half the host floor for six seconds it
 stops the server (SIGTERM, then SIGKILL after 15 s), before unified memory pages the weights. The scheduler already holds
 new admissions under that threshold. `--detach` runs the same command as the user systemd service `hibana-qwen38` or
-`hibana-flashnext`, logging to `$HIBANA_RESULTS/logs/<service>.log` (the previous run's is `.log.1`); `hibana stop`
+`hibana-flashnext` with the caller's settings and cache paths (`HIBANA_*`, `HF_*`, `CUDA_*`, `TRITON_*`,
+`TORCH*`, `XDG_CACHE_HOME`, `TMPDIR` and the like), logging to `$HIBANA_RESULTS/logs/<service>.log` (the previous run's is `.log.1`); `hibana stop`
 sends it SIGTERM, so it drains and, with the SSD tier on, stores its cached prefixes. Automatic KV capacity depends
 on available memory.
 
@@ -88,8 +89,9 @@ same) and results, traces, 3-bit checkpoints and logs in `HIBANA_RESULTS` (defau
 | Calibrated 3-bit checkpoint | `$HIBANA_RESULTS/w3-checkpoints/<target>-current`, kept on the pinned published revision at every serve ([how](w3-calibration.md#where-the-served-copies-come-from)) | `HIBANA_W3_CHECKPOINT=/dir`. Without one the 27B rounds to nearest and Flash-Next serves its FP8 trunk; the preflight and `/get_server_info` (`w3_warning`) say so ([calibration](w3-calibration.md)) |
 | Flash-Next routed experts | the W3 checkpoint's 3-bit experts when it carries them (`fast`, `throughput`) | `HIBANA_FLASHNEXT_EXPERTS=nvfp4` keeps the checkpoint's NVFP4 experts |
 | Flash-Next PLE table on two Sparks | each rank's half of the heads in device memory (23.8 GiB per rank; [tensor parallel](tensor-parallel.md)) | `HIBANA_PLE_RESIDENT=0` reads it from the memory maps on the host, as one Spark does (which prefetches a prompt's later chunks into the page cache) |
-| Image input | Nemotron and Bolt: on (their vision encoder, 1.6 GiB); the 27B and Flash-Next: none | `HIBANA_VISION=0` leaves the encoder's memory to the pools; images are then a 400 ([API](api.md#images)) |
+| Image input | Nemotron and Bolt: on (their vision encoder, 1.6 GiB); the 27B and Flash-Next: off | `HIBANA_VISION=0` leaves the encoder's memory to the pools; images are then a 400 ([API](api.md#images)). `HIBANA_VISION=1` serves the 27B's and Flash-Next's vision tower (0.86 GiB, up to 2.2 GiB to encode the largest image); `HIBANA_VISION_MAX_PIXELS` caps their images (default 16,777,216 pixels, 16,384 tokens) |
 | Shape-stable prefill numerics | off | `HIBANA_STABLE_NUMERICS=1` (M-invariant kernels for the three row-count-dependent ops; see [limits](#numerical-limits)) |
+| Memory left to other programs (host floor) | 6 GiB of `MemAvailable` | `HIBANA_HOST_FLOOR_GIB`: raise it by what other services on the Spark use at their peak; it also moves the admission hold and the memory guard (half of it) and preflight's check (host floor, below) |
 
 For MTP on the 27B, use `HIBANA_PROPOSER=mtp HIBANA_SPEC=3 HIBANA_DRAFT_PRECISION=bf16`. `HIBANA_PROPOSER` is `mtp`,
 `dflash2` or, on Inkling, `dspark`.
@@ -108,11 +110,13 @@ Further settings, for tuning, diagnostics and the tools (defaults from `engine/c
 | `HIBANA_GDN_PREFILL` | `auto` | GDN prefill kernels: `auto` (CuTe on SM12x where supported), `cute` or `triton` |
 | `HIBANA_TRUNK_KEEP_BF16` | unset | A diagnostic: a regex of Flash-Next trunk projections kept in BF16 |
 | `HIBANA_DEBUG_SYNC` | off | `1` synchronizes after each phase, so an asynchronous CUDA fault names the phase and batch that launched it |
+| `HIBANA_EXIT_ON_FAILURE` | off | `1` ends the process when the engine fails (a CUDA error, say), so a supervisor (Docker's restart policy, systemd's `Restart=`) can start it again; off, the server stays up and `/health` answers 503 until restarted by hand. On two Sparks a failure always ends it |
 | `HIBANA_CUDA_ARCH` | `12.1a` | The architecture the CUDA kernels built on first use target |
 | `HIBANA_CLAUDE_MODEL` | `claude-hibana-<model>`, e.g. `claude-hibana-nemotron-3.5-super` | The model id `hibana launch claude` gives Claude Code (it accepts only ids containing "claude") |
 | `HIBANA_CLAUDE_CONFIG` | `~/.claude-hibana` | Claude Code's configuration directory under `hibana launch claude`, apart from the user's own |
 | `HIBANA_EVALS` | unset (the `eval` group) | A sharar-eval checkout for `tools/evaluate.py`, `tools/h2h_pr.py` and `tools/lossy_gate.py` (`--evals`) |
 | `HIBANA_EVALS_PYTHON` | unset | That checkout's Python (`--python`; default its `.venv`) |
+| `HIBANA_MAX_QUEUED` | `0` | Requests queued before HTTP 429; it only raises the profile's limit (16, at least two batches), `0` keeps it |
 
 ### Adaptive verification (DFlash2)
 
@@ -334,7 +338,10 @@ are counted: the drafter, the SSD tier's staging, FlashInfer's workspaces, the C
 prefill takes outside PyTorch, and the activation blocks PyTorch keeps cached (the server log's "counted after the
 pools" line; `/get_server_info`'s `after_plan_gib`). Admission holds, and the memory guard stops the server, only under
 half the floor, when other programs have used more than it left them (`HIBANA_HOST_FLOOR_GIB` moves both; main's
-`HIBANA_MIN_AVAILABLE_KIB` is retired). Preflight wants the 24 GiB load peak above the floor. `/get_server_info` also reports `memory_gib`:
+`HIBANA_MIN_AVAILABLE_KIB` is retired). Preflight wants the 24 GiB load peak above the floor.
+On a Spark shared with other services (a database, a proxy, an image model), raise the floor by what they use at their
+peak: at `HIBANA_HOST_FLOOR_GIB=24` the pools leave 24 GiB, admission holds and the guard act under 12 GiB, and
+preflight wants 48 GiB available before loading. `/get_server_info` also reports `memory_gib`:
 PyTorch's allocated and reserved bytes, now and at their peak, and the process's resident memory. Terms and measurements: [memory_plan.md](memory_plan.md).
 
 ## Development

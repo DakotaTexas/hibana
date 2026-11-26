@@ -106,11 +106,12 @@ def setup(s: Settings, peer_host: str, w3: Path | None, log=print, models: bool 
 
 
 def copy(peer_host: str, paths: list[Path], log=print) -> None:
-    """Each directory at the same path on the peer (rsync copies only what changed)."""
+    """Each directory at the same path on the peer (rsync copies only what changed). Links out of the directory (a cache's
+    blobs can link into a shared store) are copied as files: the trailing slash makes the directory the transfer root."""
     for src in paths:
-        ssh(peer_host, f"mkdir -p {shlex.quote(str(src.parent))}", check=True)
+        ssh(peer_host, f"mkdir -p {shlex.quote(str(src))}", check=True)
         log(f"copying {src} to {peer_host}")
-        run(["rsync", "-a", str(src), f"{peer_host}:{src.parent}/"])
+        run(["rsync", "-a", "--copy-unsafe-links", f"{src}/", f"{peer_host}:{src}/"])
 
 
 def rank_env(s: Settings, w3: Path | None, device: str) -> dict[str, str]:

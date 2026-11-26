@@ -28,6 +28,7 @@ from hibana.model.flashnext.linear import TrunkLinear
 from hibana.model.flashnext.moe import MoeLayer, nvfp4_expert_names
 from hibana.model.flashnext.ple import PleLayer
 from hibana.model.gdn_plan import prepare_gdn_prefill
+from hibana.model import qwen_vision
 from hibana.model.rope import PartialRotary
 from hibana.target import FLASHNEXT, Target
 from hibana.weights import files
@@ -107,8 +108,10 @@ class FlashNext:
         expert_layers = calibrated.expert_layers() if calibrated and current().flashnext_experts != "nvfp4" else set()
         if expert_layers and expert_layers != set(range(target.num_layers)):
             raise ValueError(f"the W3 checkpoint carries routed experts for {len(expert_layers)} of {target.num_layers} layers")
-        # the experts dominate, and each rank loads its half
-        check_load_headroom((target.weight_load_peak_bytes - (_w3_expert_saving(target) if expert_layers else 0)) // tp.size)
+        vision = current().vision
+        # the experts dominate, and each rank loads its half (the vision tower, replicated, whole)
+        check_load_headroom((target.weight_load_peak_bytes - (_w3_expert_saving(target) if expert_layers else 0)) // tp.size
+                            + (qwen_vision.VISION_BYTES if vision else 0))
         self.device = torch.device(device)
         cfg = target.load_model_config(snap)
         types = target.layer_types_of(cfg)
@@ -117,7 +120,8 @@ class FlashNext:
         started = time.perf_counter()
         w = SnapshotWeights(snap)
         self.embed = w.get(f"{PREFIX}.embed_tokens.weight").to(self.device)
-        self.rope = PartialRotary(target.head_dim, target.rotary_dim, target.rope_theta, target.max_position_embeddings, self.device)
+        self.rope = PartialRotary(target.head_dim, target.rotary_dim, target.rope_theta, target.max_position_embeddings, self.device,
+                                  mrope_section=qwen_vision.mrope_section(cfg) if vision else None)
         self.ragged = ops.RaggedAttention(self.device, target.num_attention_heads, target.num_kv_heads, target.head_dim)
         self.layers: list[DecoderLayer] = []
 
@@ -150,6 +154,7 @@ class FlashNext:
         # Vocabulary-parallel: each rank scores its rows of the vocabulary and `logits` gathers them.
         self.lm_head = TrunkLinear.load(w, ["lm_head.weight"], self.device, self.precision,
                                         ColumnParallel((div_even(target.vocab_size, tp.size),)))
+        self.vision = qwen_vision.load(w, self.device, cfg, current().vision_max_pixels, log) if vision else None
         w.close()
         torch.cuda.synchronize()
         # Bytes one decode token streams: the trunk, the head, one embedding row and its routed experts.
@@ -239,6 +244,8 @@ class FlashNext:
         if ctx.mode == "prefill":
             prepare_gdn_prefill(ctx, len(input_ids), input_ids.device)
         x = torch.nn.functional.embedding(input_ids, self.embed)
+        if ctx.media_rows is not None:
+            x.index_copy_(0, ctx.media_rows, ctx.media_embeds)
         hyper = torch.cat([x] * self.target.hc_count, dim=-1)
         ctx.capture = capture
         out: dict = {"input_ids": input_ids, "positions": ctx.positions}

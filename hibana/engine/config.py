@@ -89,6 +89,7 @@ class EngineConfig:
     flashnext_cache: str | None = None        # HIBANA_FLASHNEXT_CACHE: Flash-Next's model cache
     max_context: int | None = None            # HIBANA_MAX_CONTEXT (0/unset: the target's)
     max_batch: int = 4                        # HIBANA_MAX_BATCH: most requests decoded together, 1-128 (the throughput profile: 16)
+    max_queued: int = 0                       # HIBANA_MAX_QUEUED: requests queued before HTTP 429, at least the profile's (0: the profile's)
     cuda_arch: str = "12.1a"                  # HIBANA_CUDA_ARCH for the JIT-built CUDA kernels
     tp_allreduce: str = "rdma"                # HIBANA_TP_ALLREDUCE: rdma (the one-shot for decode-sized all-reduces between two ranks) or nccl (every one on NCCL, as vLLM)
     # --- weights and numerics
@@ -105,7 +106,8 @@ class EngineConfig:
     inkling_trunk: str = "bf16"               # HIBANA_INKLING_TRUNK: bf16 (the checkpoint's) | fp8 (attention projections and head at load)
     flashnext_experts: str = "w3"             # HIBANA_FLASHNEXT_EXPERTS: w3 (the W3 checkpoint's 3-bit routed experts when it carries them) | nvfp4
     bolt_experts: str = "b12x"                # HIBANA_BOLT_EXPERTS: b12x fused MoE (BF16 activations) | fp8 grouped native IQ2 | bf16 Triton weight-only
-    vision: bool = False                      # HIBANA_VISION: load the checkpoint's vision encoder for image input (Nemotron Super and Bolt; about 1.7 GiB)
+    vision: bool = False                      # HIBANA_VISION: load the checkpoint's vision encoder for image input
+    vision_max_pixels: int = 16_777_216       # HIBANA_VISION_MAX_PIXELS: the Qwen targets' resize cap per image (16,384 tokens)
     # --- speculation
     spec: str | None = None                   # HIBANA_SPEC as given ("auto"/unset: the proposer's default depth)
     proposer: str | None = None               # HIBANA_PROPOSER: mtp | dflash2 | dspark (serve: the target's default)
@@ -144,6 +146,7 @@ class EngineConfig:
     trace_confidence: bool = False            # HIBANA_TRACE_CONFIDENCE: the MTP draft's confidence per drafted position in trace rounds (read when the proposer is built)
     # --- diagnostics and benchmark loader
     debug_sync: bool = False                  # HIBANA_DEBUG_SYNC
+    exit_on_failure: bool = False             # HIBANA_EXIT_ON_FAILURE: end the process when the engine fails, so a supervisor can restart it
     bench_verify_state: str = "snapshots"     # HIBANA_BENCH_VERIFY_STATE
     moe_keep: int = 0                         # HIBANA_MOE_KEEP=k: top experts a token is guaranteed in decode and verify (0, or k >= the top-k: all)
     moe_budget: int = 0                       # HIBANA_MOE_BUDGET=[P:]B: distinct experts a decode or verify forward reads, min(B, P x requests); 0: off (moe.py route_budget)
@@ -160,6 +163,8 @@ class EngineConfig:
         for name, v in (("HIBANA_MOE_KEEP", self.moe_keep), ("HIBANA_MOE_BUDGET", self.moe_budget)):
             if v < 0:
                 raise ValueError(f"{name}={v}: a count of experts, or 0 (off)")
+        if self.max_queued < 0:
+            raise ValueError(f"HIBANA_MAX_QUEUED={self.max_queued}: must be a non-negative integer")
 
     @property
     def ssd_buffers(self) -> dict[str, int]:
@@ -177,6 +182,7 @@ class EngineConfig:
             flashnext_cache=_str(e, "HIBANA_FLASHNEXT_CACHE"),
             max_context=_int(e, "HIBANA_MAX_CONTEXT", 0) or None,
             max_batch=_int(e, "HIBANA_MAX_BATCH", 4),
+            max_queued=_int(e, "HIBANA_MAX_QUEUED", 0),
             cuda_arch=_str(e, "HIBANA_CUDA_ARCH", "12.1a"),
             tp_allreduce=_str(e, "HIBANA_TP_ALLREDUCE", "rdma"),
             w3_decode=_flag(e, "HIBANA_W3_DECODE"),
@@ -193,6 +199,7 @@ class EngineConfig:
             flashnext_experts=_str(e, "HIBANA_FLASHNEXT_EXPERTS", "w3"),
             bolt_experts=_str(e, "HIBANA_BOLT_EXPERTS", "b12x"),
             vision=_flag(e, "HIBANA_VISION"),
+            vision_max_pixels=_positive(e, "HIBANA_VISION_MAX_PIXELS", 16_777_216),
             spec=_str(e, "HIBANA_SPEC"),
             proposer=_str(e, "HIBANA_PROPOSER"),
             spec_depths=_str(e, "HIBANA_SPEC_DEPTHS"),
@@ -226,6 +233,7 @@ class EngineConfig:
             traces_max_mib=_int(e, "HIBANA_TRACES_MAX_MIB", 32768),
             trace_confidence=_flag(e, "HIBANA_TRACE_CONFIDENCE"),
             debug_sync=_flag(e, "HIBANA_DEBUG_SYNC"),
+            exit_on_failure=_flag(e, "HIBANA_EXIT_ON_FAILURE"),
             bench_verify_state=e.get("HIBANA_BENCH_VERIFY_STATE", "snapshots"),
             moe_keep=_int(e, "HIBANA_MOE_KEEP", 0),
             moe_budget=budget[1],

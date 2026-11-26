@@ -135,20 +135,23 @@ def check_capabilities(proposer) -> None:
 
 class VisionEncoder(Protocol):
     """A target's image input: the model's optional `vision` attribute (absent or None for a text-only model;
-    `model/nemotron/vision.py`). The engine uses only this, as every target with a vision tower will: the API makes an
-    image `image_start`, `tokens(w, h)` placeholders (engine/media.py) and `image_end`; the model reads each placeholder
-    as `image_token`, and prefill replaces those rows' embeddings with `encode(preprocess(rgb))`
-    (`ForwardContext.media_rows`, `media_embeds`)."""
+    `model/nemotron/vision.py`, `model/qwen_vision.py`). The API makes an image `image_start`, `tokens(w, h)`
+    placeholders (engine/media.py) and `image_end` where the template wrote `marker`; the model reads each placeholder as
+    `image_token`, and prefill replaces those rows' embeddings with `encode(preprocess(rgb))`. With `mrope` the model
+    rotates the embeddings, `grid(w, h)` rows by cols in row-major order, by 2-D positions (engine/mrope.py)."""
 
     image_token: int
     image_start: int
     image_end: int
+    marker: str  # what the chat template writes for an image part
+    mrope: bool
     identity: bytes  # part of every image's digest: change it with `preprocess`, so no cached prefix outlives the change
     workspace_bytes: int  # device memory one encode allocates beyond its output, at the largest tile
 
     def tokens(self, width: int, height: int) -> int: ...  # embeddings of a width x height image; ValueError if unreadable
-    def preprocess(self, rgb) -> torch.Tensor: ...  # an RGB [H, W, 3] uint8 array -> the encoder's input, on the CPU
-    def encode(self, pixels: torch.Tensor) -> torch.Tensor: ...  # -> [tokens, hidden] embeddings on the device
+    def grid(self, width: int, height: int) -> tuple[int, int]: ...  # their (rows, cols)
+    def preprocess(self, rgb): ...  # an RGB [H, W, 3] uint8 array -> the encoder's input, on the CPU (opaque to the engine)
+    def encode(self, pixels) -> torch.Tensor: ...  # -> [tokens, hidden] embeddings on the device
 
 
 class ExecutionBackend(Protocol):
