@@ -241,7 +241,11 @@ from two requests on, 64 a call is above what the rows need.
 
 ## Relaxed verification
 
-`fast` accepts sampled requests' drafts with soft acceptance s = 0.25 and verifies greedy requests exactly. DSpark's
+`fast` accepts sampled requests' drafts with soft acceptance s = 0.25, gated to drafts the target ranks within its
+top 3 and within 2.0 nats of its top token (`HIBANA_ACCEPT_SOFT_GATE=3:2.0`; a draft outside takes the exact test), and
+verifies greedy requests exactly. At temperature 1.0 (18 h2h prompts, one Spark, no sharing, 1 / 4 / 8 / 16 requests)
+the gated rule decodes DSpark +7 / +5 / +4 / +6% and DFlash2 +4 / +10 / +6 / +7% over exact acceptance, within noise
+of the ungated rule (+5 / +5 / +6 / +7% and +10 / +6 / +8 / +12%). The GPQA numbers below are the ungated rule's. DSpark's
 drafts are single tokens, so a drafted token y is accepted with probability min(1, p(y) e^s) instead of p(y): s scales
 every draft's acceptance directly. GPQA Diamond (198, sampled, thinking on, `exact` with 16 requests, drafts verified at
 every batch size, paired with exact acceptance at 68.7%): s = 0.25 68.7% (53 answers at the cap against 51); s = 0.5

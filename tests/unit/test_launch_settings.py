@@ -95,6 +95,9 @@ def test_sampled_requests_get_one_bounded_rule(profile, target, proposer, soft):
 def test_inkling_drafts_with_dflash2_unless_told_dspark(env):
     s = resolve(env, "inkling")
     assert s.proposer == "dflash2" and s.get("HIBANA_DRAFT") == "pinned"
+    assert (s.get("HIBANA_ACCEPT_SOFT"), s.get("HIBANA_ACCEPT_SOFT_GATE")) == ("0.25", "3:2.0")
+    assert s.engine_args()[s.engine_args().index("--accept-soft-gate") + 1] == "3:2.0"
+    assert "HIBANA_ACCEPT_SOFT_GATE" not in resolve(env, "inkling", "exact").values
     assert s.get("HIBANA_SPEC") == "7" and s.get("HIBANA_SPEC_DEPTHS") == "1:7,2:7,4:7"
     d = resolve({**env, "HIBANA_PROPOSER": "dspark"}, "inkling")
     assert d.proposer == "dspark" and d.get("HIBANA_SPEC_DEPTHS") == "1:3,2:3,4:3" and "--draft" not in d.engine_args()

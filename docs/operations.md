@@ -203,7 +203,7 @@ the config file wins. `/get_server_info` reports the profile under `config`.
 |---|---|---|---|
 | Relaxed acceptance, greedy requests (`HIBANA_ACCEPT_DEFAULT`) | off | top-3 within 2.0 logits; Flash-Next DFlash2 top-2 within 1.0; Bolt off | as fast |
 | Relaxed acceptance, sampled requests (`HIBANA_ACCEPT_SOFT`, `accept_soft` in the [API](api.md)) | 0 (exact) | Flash-Next and Nemotron s = 0.5; Inkling 0.25; the 27B and Bolt 0 (exact) | as fast |
-| Gate on sampled relaxed acceptance (`HIBANA_ACCEPT_SOFT_GATE`, K:M: e^s only for drafts in the target's top K within M nats of its top token) | off | off (every draft) | as fast |
+| Gate on sampled relaxed acceptance (`HIBANA_ACCEPT_SOFT_GATE`, K:M: e^s only for drafts in the target's top K within M nats of its top token) | off | Inkling 3:2.0; else off (every draft) | as fast |
 | Sampled MTP drafts (`HIBANA_MTP_SAMPLE`, [below](#sampled-mtp-drafts)) | off | on where MTP drafts | as fast |
 | Calibrated 3-bit decode copies (`HIBANA_W3_DECODE`; on Flash-Next and Nemotron also the routed experts; Bolt's trunk and vocabulary head) | off | on | on |
 | Device-resident acceptance (`HIBANA_DEVICE_ACCEPT`) | off | Flash-Next and Nemotron | as fast |

@@ -148,6 +148,11 @@ def profile_defaults(profile: str, target: str, flashnext_experts: str = "w3", t
         # s = 0.5 (longer answers, more at the cap). T 0.7 h2h: one request +11%, 2 / 4 streams +4%. Greedy requests
         # stay exact: top-2 within 1.0 scored MMLU-Pro greedy 79.5% against 82.0% (p 0.27).
         p["HIBANA_ACCEPT_SOFT"] = "0.25"
+        # gated to drafts the target ranks within its top 3 and within 2.0 nats of its top token: a draft outside takes
+        # the exact test, so it never comes out more often than the target gives it. Speed at T 1.0 (one Spark, 18 h2h
+        # prompts, no sharing, 1 / 4 / 8 / 16 requests) against exact: DSpark +7 / +5 / +4 / +6%, DFlash2 +4 / +10 / +6
+        # / +7%, where the ungated rule gave +5 / +5 / +6 / +7% and +10 / +6 / +8 / +12%.
+        p["HIBANA_ACCEPT_SOFT_GATE"] = "3:2.0"
         if proposer == "dflash2":
             # DFlash2 verifies 8 rows a request where DSpark verifies 4, so its budget is wider: keep 6 with 20 a request up
             # to 80 a call keeps the routing 16:64 keeps for DSpark's rows (replaying GPQA reasoning, each row's top-8
