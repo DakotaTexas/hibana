@@ -717,3 +717,9 @@ def test_chat_tool_call_in_unclosed_reasoning_is_a_tool_call(stream):
         assert choice['finish_reason'] == 'tool_calls' and not (choice['message']['content'] or '').strip()
         assert json.loads(choice['message']['tool_calls'][0]['function']['arguments']) == {'city': 'Paris', 'days': 2}
         assert choice['message']['reasoning_content'].strip() == 'Let me check.'
+    from hibana.engine import config
+    with config.using(config.current().replace(model_alias='qwen3-coder')):
+        response, _, _ = post({'max_tokens': 5, 'messages': [{'role': 'user', 'content': 'hi'}]}, 'ok')
+        assert response.json()['model'] == 'qwen3-coder'
+        response, _, _ = post(body(model='claude-opus-4-1'), 'ok')
+        assert response.json()['model'] == 'claude-opus-4-1'

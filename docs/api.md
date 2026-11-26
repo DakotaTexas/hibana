@@ -20,6 +20,8 @@ speculative scratch capacity.
 | `GET /get_server_info` | Serving profile, scheduler, cache and speculation statistics |
 | `GET /metrics` | Metrics |
 
+When `HIBANA_MODEL_ALIAS` is set, chat and text completion responses report the alias in `model`, including streaming chunks and usage chunks, and `/v1/messages` uses it when the request omits `model`. Otherwise, they report the served checkpoint id.
+
 ## Chat controls
 
 | Field | Supported behavior |
