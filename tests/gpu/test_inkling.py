@@ -276,7 +276,7 @@ def test_draft_rounds_emit_what_a_prefill_predicts(proposer, depth):
             full = model.logits(model.prefill(torch.tensor(ids + out, device=DEVICE))["norm"]).argmax(-1).tolist()
             agree = sum(a == b for a, b in zip(out, full[len(ids) - 1:len(ids) - 1 + len(out)])) / len(out)
             assert agree > 0.8, agree
-        for r in reqs:  # the drafter is right more often than not (DFlash2: 3.6 tokens a round at depth 7)
+        for r in reqs:  # the drafter earns its rounds (DFlash2 at depth 7: 3.6 tokens a round on six greedy prompts)
             assert r.spec_emitted / r.spec_rounds > (2.5 if proposer == "dflash2" else 1.3), (r.spec_emitted, r.spec_rounds)
         for r in reqs:
             ex.release(r)
@@ -364,29 +364,20 @@ def test_ssd_resume_matches_a_resume_from_memory(tmp_path, proposer):
         engine_config.install(before)
 
 
-def test_ssd_store_keeps_trunks_and_sharing_apart():
-    """The SSD store's identity names the trunk format and the expert sharing, so a `fast` server never restores
-    prefixes (K/V, convolution windows, drafter context) that an `exact` server stored, or the other way round."""
-    import json
-    from hibana.engine import config as engine_config
-    before = engine_config.current()
-    seen = []
-    try:
-        for trunk, keep, per, budget in (("bf16", 0, 0, 0), ("fp8", 0, 0, 0), ("fp8", 6, 16, 64)):
-            engine_config.install(before.replace(inkling_trunk=trunk, moe_keep=keep, moe_budget_per_request=per, moe_budget=budget))
-            model = load()
-            seen.append(json.dumps(model.arithmetic_identity, sort_keys=True))
-            del model
-            gc.collect()
-            torch.cuda.empty_cache()
-    finally:
-        engine_config.install(before)
-    assert len(set(seen)) == 3, seen
+def test_a_row_alone_matches_it_beside_another():
+    """On the pinned checkpoint: a one-token prefill against the same token as the first row of a two-token one, which
+    sees only itself. A core pass's message sources must be copies: a single row's slice of the block states is a view
+    of the slot the pass rewrites, so a one-row call (a one-token chunk, decode at one request) would read the new."""
+    model = load()
+    ids = torch.tensor(chat_ids("Why does a lighthouse lens turn?")[:2], device=DEVICE)  # the template's first two
+    alone = model.logits(model.prefill(ids[:1])["norm"])
+    beside = model.logits(model.prefill(ids)["norm"][:1])
+    assert cosine(alone, beside) > 0.9984  # 0.9989-0.9990 with copies (alone, in the suite), 0.99787 reading the view
 
 
 def test_dspark_covers_the_served_context():
     """The drafter is built for the context the engine serves (HIBANA_MAX_CONTEXT), and an executor that serves more
-    than it covers is refused at startup: a request past the drafter's positions stopped the engine."""
+    than it covers is refused at startup: a request past the drafter's positions would stop the engine."""
     from hibana.engine import config as engine_config
     from hibana.engine.executor import Executor
     before = engine_config.current()

@@ -27,7 +27,7 @@ speculative scratch capacity.
 | `messages` | Nonempty conversation rendered with the pinned snapshot template; `image_url` parts on a target serving images ([images](#images)). Earlier assistant turns' `reasoning_content` is rendered on every target (Nemotron's template variable `truncate_history_thinking` defaults to false here; `chat_template_kwargs` can set it), so a new user turn appends to the cached prompt instead of changing it |
 | `stream` | Server-sent events ending with `[DONE]` |
 | `max_tokens` / `max_completion_tokens` | Requested output budget |
-| `temperature`, `top_p`, `top_k`, `seed` | Validated sampling parameters. An omitted `temperature` is OpenAI's 1.0 (with top_p 0.95 and top_k 20, the models' own generation config); send `temperature: 0` for greedy. OpenCode sends no sampling fields, and greedy thinking looped until `max_tokens` in its runs. `/v1/completions` and `/generate` keep greedy as their default |
+| `temperature`, `top_p`, `top_k`, `seed` | Validated sampling parameters. An omitted `temperature` is OpenAI's 1.0 (with Hibana's defaults top_p 0.95 and top_k 20, kept because the fused sampled verify needs a top_k; not every model's generation config sets them); send `temperature: 0` for greedy. OpenCode sends no sampling fields, and greedy thinking looped until `max_tokens` in its runs. `/v1/completions` and `/generate` keep greedy as their default |
 | `stop` | A nonempty string or list of nonempty stop strings |
 | `n` | 1 to 16 choices (non-streaming). The prompt is prefilled once by a one-token primer and published to the prefix cache; the n samples resume at its last chunk end (at most 64 tokens re-prefilled each) and decode side by side, up to the batch size at a time. With a `seed`, choice i uses seed + i; use a temperature above 0 for distinct choices |
 | `chat_template_kwargs.enable_thinking` | Thinking defaults to true; false disables it |
@@ -107,6 +107,8 @@ engine.
   parsed calls come back as `tool_calls` (`tool_use` blocks on Messages).
 - A forced `tool_choice` cannot be combined with a JSON `response_format`; either needs `tools` / a schema.
 - `/get_server_info` counts constrained requests by kind (`constrained`).
+- Inkling 2 Mini rejects constrained requests (a JSON `response_format`, a required or named `tool_choice`) with 400:
+  its turns are framed by tokens the grammar cannot emit.
 
 ## Images
 
@@ -154,7 +156,7 @@ prompt length as `{"input_tokens": N}`.
 | `tool_choice` | `auto` or omitted: unconstrained. `none`: as in chat. `any` / `{"type":"tool","name":...}`: constrained, as chat's `required` / named function (one or more calls to any tool / exactly one call to that tool, [constrained output](#constrained-output)); they need `tools`, and the name must be one of them |
 | `thinking` | `enabled` or `adaptive` turn thinking on (`budget_tokens` is not enforced), `disabled` turns it off; omitted, `chat_template_kwargs.enable_thinking` decides, default on |
 | `output_config.effort` | As chat `reasoning_effort`: Claude Code's default `high` is the template's `xhigh`, `/effort low` its `low` (the template's instruction only, not a token budget) |
-| `temperature`, `top_p`, `top_k`, `stop_sequences`, `stream` | As the chat fields, except that an omitted `temperature` is Anthropic's 1.0 (with the chat defaults top_p 0.95 and top_k 20, the models' own generation config), not greedy. Claude Code sends no sampling fields, and greedy thinking looped until `max_tokens` in its sessions |
+| `temperature`, `top_p`, `top_k`, `stop_sequences`, `stream` | As the chat fields, except that an omitted `temperature` is Anthropic's 1.0 (with the chat defaults top_p 0.95 and top_k 20, Hibana's own), not greedy. Claude Code sends no sampling fields, and greedy thinking looped until `max_tokens` in its sessions |
 | `trace`, `accept_top_k`, `accept_margin`, `accept_soft`, `chat_template_kwargs` | Hibana's extensions, as in chat |
 
 `cache_control` markers are accepted and not acted on; the prefix cache

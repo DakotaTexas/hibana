@@ -52,8 +52,9 @@ class InklingParser:
 
     def _token(self, token: str) -> tuple[str, str]:
         out = ("", "")
-        if token == END and self._kind == "tool":
-            out = ("", tool_block(self._tool))
+        if self._kind == "tool":
+            if self._tool.strip():
+                out = ("", tool_block(self._tool))
             self._tool = ""
         self._kind = KINDS.get(token, "header")
         return out

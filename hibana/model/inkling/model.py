@@ -76,7 +76,7 @@ class Layer:
         self.gates = self.gate_stack = None
         if c.LOOP_START <= index < c.LOOP_END:  # the query, key, value and MLP inputs' message gates
             self.gates = [MessageGate(w, f"{p}.controllers.{name}", device) for name in ("attn", "k", "v", "mlp")]
-            # the four stacked, as the decode kernel reads them
+            # the four stacked, as the gate kernels read them (decode's `kernels.mix`, prefill's `prefill.gate`)
             self.gate_stack = tuple(torch.stack([getattr(g, name) for g in self.gates]).contiguous() for name in ("down", "forget16", "gain16"))
 
     def gate(self, x: torch.Tensor, message: torch.Tensor, first: int, weight: torch.Tensor) -> torch.Tensor:
@@ -206,11 +206,11 @@ class Inkling:
             raise ValueError("Inkling serves on one Spark")
         check_load_headroom(target.weight_load_peak_bytes)
         self.device = torch.device(device)
-        cfg = target.load_model_config(snap)
+        cfg = current()
         self.target = target
-        self.eos = int(cfg["eos_token_id"])
+        self.eos = int(target.load_model_config(snap)["eos_token_id"])
         self.w3_identity = None
-        self.precision = current().inkling_trunk  # bf16 | fp8: the attention projections and the head
+        self.precision = cfg.inkling_trunk  # bf16 | fp8: the attention projections and the head
         started = time.perf_counter()
         w = SnapshotWeights(snap)
         get = lambda name: w.get(f"{c.PREFIX}.{name}").to(self.device)  # noqa: E731
@@ -235,20 +235,19 @@ class Inkling:
         visit_bytes = {i: layer.attn.bytes + layer.moe.expert_bytes * c.EXPERTS_PER_TOKEN // c.NUM_EXPERTS for i, layer in enumerate(self.layers)}
         self.stream_bytes = sum(visit_bytes[i] for i, _ in c.VISITS) + self.lm_head.bytes
         self._extras = InklingExtras()
-        # The bundled DSpark drafter, when the server speculates: its context K/V are rows of the KV pool's pages
-        # (`register_pages`), so it loads with the model.
+        # The bundled DSpark drafter, when the server speculates with it (HIBANA_PROPOSER=dspark): its context K/V are
+        # rows of the KV pool's pages (`register_pages`), so it loads with the model.
         self.draft = None
-        if current().spec not in (None, "", "0") and current().proposer in (None, "dspark"):
+        if cfg.spec not in (None, "", "0") and cfg.proposer in (None, "dspark"):
             from hibana.model.inkling.dspark import InklingDraft
             # as long as the engine serves (HIBANA_MAX_CONTEXT), not the target's default: its rotary table and page
             # lists end there
-            self.draft = InklingDraft(snap, self, current().max_context or target.context_length)
+            self.draft = InklingDraft(snap, self, cfg.max_context or target.context_length)
         self.state_slots = 0  # the state pool's slots, once registered
         # the SSD store keys stored prefixes by the arithmetic that produced them: the trunk's format and expert sharing
         # (K/V, convolution windows and the drafter's context all differ between them)
-        cfg = current()
-        self.arithmetic_identity = {"trunk": cfg.inkling_trunk}
-        if 0 < cfg.moe_keep < c.EXPERTS_PER_TOKEN:
+        self.arithmetic_identity = {"trunk": self.precision}
+        if self.layers[0].moe.keep:
             self.arithmetic_identity["moe_sharing"] = f"{cfg.moe_keep}:{cfg.moe_budget_per_request}:{cfg.moe_budget}"
         if log:
             allocated = torch.cuda.memory_allocated() / 2**30 if self.device.type == "cuda" else 0.0
@@ -272,7 +271,7 @@ class Inkling:
     def register_state(self, pool) -> torch.Tensor:
         """Every visit's convolution windows: the last three inputs of its four streams, oldest first."""
         self.state_slots = pool.num_slots + len(pool.scratch)
-        return pool.register_aux(STATE_NAME, (c.NUM_VISITS, c.CONV_KERNEL - 1, c.CONV_WIDTH), torch.bfloat16)
+        return pool.register_aux(STATE_NAME, c.CONV_STATE_SHAPE, torch.bfloat16)
 
     def _layout(self, ctx: ForwardContext, rows: int) -> Layout:
         state = self.register_state(ctx.state_pool) if ctx.state_pool is not None else None
@@ -330,10 +329,11 @@ class Inkling:
                 if loop_pass == 0:
                     prelude = (hidden, count)
                 else:  # the previous pass's two block states (the second still running) are this pass's message sources
+                    # copies, not `.contiguous()`: one row's slice is a view of the slot this pass rewrites
                     if prefill_rows:
-                        sources = (states[:, count - 1:count].contiguous(), hidden)
+                        sources = (states[:, count - 1:count].clone(), hidden)
                     else:
-                        sources = states[:, count - 1:count + 1].contiguous()
+                        sources = states[:, count - 1:count + 1].clone()
                         kernels.rms(hidden, into=sources, slot=1)
                     hidden, count = prelude
             if loop_pass:

@@ -23,9 +23,10 @@ Layers, cheapest first:
      multilingual, structured, short chat), scored 64 rows per forward (the decode path) as
      argmax agreement and truncated KL(baseline || candidate); the floor is the baseline scored at
      32 rows per forward against itself. Per domain. Inkling runs its decode kernels only for decode
-     and verification rows, where its FP8 trunk keeps BF16 activations and its experts are shared: its
-     continuations are scored one row per step through the plain decode step (the baseline's tokens
-     forced), and the floor is the baseline scored by prefill, 64 rows per forward, against itself.
+     and verification rows, where its experts are shared and its FP8 trunk keeps BF16 activations in
+     calls of up to four rows: its continuations are scored one row per step through the plain decode
+     step (the baseline's tokens forced), and the floor is the baseline scored by prefill, 64 rows per
+     forward, against itself.
   2  Speculation health (same process): tokens per verify round, round cost and decode tok/s of
      each prompt, greedy with the profile's acceptance rule, paired per prompt; the floor is a
      second baseline pass. The speed delta of the verdict is the decode tok/s ratio here.
@@ -101,7 +102,7 @@ PROFILE_NAMES = launch.PROFILE_NAMES
 # EngineConfig fields the served arm must report exactly as the in-process arm installed them.
 CHECKED = ("target", "profile", "w3_decode", "w3_checkpoint", "stable_numerics", "flashnext_trunk",
            "trunk_keep_bf16", "draft_vocab", "draft_head",
-           "draft_head_rescore", "device_accept", "accept_default", "accept_soft",
+           "draft_head_rescore", "device_accept", "accept_default", "accept_soft", "accept_soft_gate",
            "qsa_sparse_graphs", "flashnext_experts", "ssm_state", "ssm_window",
            "ssm_compensators", "bolt_experts", "inkling_trunk", "moe_keep", "moe_budget", "moe_budget_per_request")
 
@@ -197,13 +198,16 @@ def arm_plan(s: launch.Settings) -> dict:
     w3 = preflight.ensure_w3(s, fetch=False)
     cenv = {k: v for k, v in s.engine_env(w3).items() if k not in SERVER_ONLY}
     alone = [d for d in s.get("HIBANA_SPEC_DEPTHS", "").split(",") if d.split(":")[0] == "1"]
-    if alone:  # the arm runs one request at a time: it verifies as a request alone is served (Inkling: 3 of 7)
+    if alone:  # the arm runs one request at a time: it verifies as a request alone is served
         cenv["HIBANA_SPEC_DEPTHS"] = alone[0]
     spec = s.spec
     accept = accept_rule(s.get("HIBANA_ACCEPT_DEFAULT", "off")) if spec else "1:0.0"
     cenv["HIBANA_SPEC"], cenv["HIBANA_ACCEPT_DEFAULT"] = str(spec), accept
     # sampled requests' s, as `hibana engine` records it (0 without speculation)
     cenv["HIBANA_ACCEPT_SOFT"] = s.get("HIBANA_ACCEPT_SOFT", "0") if spec else "0"
+    from hibana.api.validation import parse_soft_gate
+    g = parse_soft_gate(s.get("HIBANA_ACCEPT_SOFT_GATE")) if spec else (1, 0.0)
+    cenv["HIBANA_ACCEPT_SOFT_GATE"] = f"{g[0]}:{g[1]}"
     return {"target": s.target, "env": cenv, "proposer": s.proposer, "spec": spec,
             "verify_state": s.get("HIBANA_VERIFY_STATE", "reconstruct"), "draft_precision": s.get("HIBANA_DRAFT_PRECISION", "bf16"),
             "draft": str(s.draft_dir) if s.draft_dir else None, "accept": accept}

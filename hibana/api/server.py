@@ -102,6 +102,9 @@ def create_app(engine: EngineLoop, tok: SnapshotTokenizer, tmpl: ChatTemplate, d
 
     def _constraint(spec: tuple[str, object], tools: list | None, in_reasoning: bool):
         """The request's Constraint (engine/grammar.py); compiling runs off the event loop."""
+        if chat_format == "inkling":
+            raise InvalidRequest("constrained output (response_format, a required or named tool_choice) "
+                                 "is not supported for this target")
         if grammar_builder[0] is None:  # the served target's vocabulary: the masks cover its logits rows
             served = targets.get(describe.get("target"))
             grammar_builder[0] = Grammars.from_tokenizer(tok._tok, served.vocab_size, served.stop_token_ids)
@@ -417,8 +420,9 @@ def create_app(engine: EngineLoop, tok: SnapshotTokenizer, tmpl: ChatTemplate, d
         # OpenAI API, vLLM and SGLang: a fixed default cut off clients that leave it unset (Aider) mid-thought.
         limit = describe.get("context_length", targets.DEFAULT_TARGET.context_length)
         if "temperature" not in body and "temperature" not in (body.get("sampling_params") or {}):
-            # OpenAI's default temperature, and both targets' generation_config (top_p 0.95 and top_k 20 are the
-            # defaults). OpenCode sends no sampling fields; greedy thinking looped to max_tokens in its runs.
+            # OpenAI's default temperature. top_p 0.95 and top_k 20 are Hibana's defaults, not every checkpoint's
+            # generation_config: the fused sampled verify needs a top_k. OpenCode sends no sampling fields; greedy
+            # thinking looped to max_tokens in its runs.
             body = {**body, "temperature": 1.0}
         params = _sampling_from(body, max_default=max(1, limit - len(ids)))
         params.message_boundary = boundary
@@ -589,8 +593,9 @@ def create_app(engine: EngineLoop, tok: SnapshotTokenizer, tmpl: ChatTemplate, d
         if isinstance(max_tokens, (int, float)) and not isinstance(max_tokens, bool):
             max_tokens = min(max_tokens, limit - len(ids))  # clients size max_tokens for a larger window
         sampling = {k: body[k] for k in ("temperature", "top_p", "top_k", "trace", "accept_top_k", "accept_margin", "accept_soft") if k in body}
-        # Anthropic's default temperature, and both targets' generation_config (top_p 0.95 and top_k 20 are the
-        # chat defaults). Claude Code sends no sampling fields; greedy thinking looped to max_tokens in its sessions.
+        # Anthropic's default temperature. top_p 0.95 and top_k 20 are Hibana's defaults, not every checkpoint's
+        # generation_config: the fused sampled verify needs a top_k. Claude Code sends no sampling fields; greedy
+        # thinking looped to max_tokens in its sessions.
         sampling.setdefault("temperature", 1.0)
         params = _sampling_from({**sampling, "max_tokens": max_tokens})
         params.message_boundary = boundary
@@ -830,8 +835,9 @@ def serve(host: str, port: int, log=print, spec: int = 0, proposer: str = "mtp",
         if proposer == 'dflash2':  # fail before loading the target
             draft = json.loads((draft_snapshot(proposer, draft_dir, served) / 'config.json').read_text())
             taps = draft['dflash_config']['target_layer_ids']
-            if draft['hidden_size'] != served.hidden_size or max(taps[:-1] if taps[-1] == served.num_layers else taps) >= served.num_layers:
-                raise ValueError(f"the DFlash2 draft (hidden {draft['hidden_size']}, taps {draft['dflash_config']['target_layer_ids']}) "
+            if (draft['hidden_size'] != served.hidden_size or any(t >= served.num_layers for t in taps[:-1])
+                    or taps[-1] > served.num_layers):
+                raise ValueError(f"the DFlash2 draft (hidden {draft['hidden_size']}, taps {taps}) "
                                  f"was not trained on {served.name} (hidden {served.hidden_size}, {served.num_layers} layers)")
 
     from hibana.engine.executor import Executor
