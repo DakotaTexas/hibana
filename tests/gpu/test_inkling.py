@@ -97,6 +97,8 @@ def cosine(a, b) -> float:
     (12, False, False, torch.float8_e4m3fn, 1),  # a layer that opens a block, MXFP8 experts
     (7, True, True, torch.float8_e4m3fn, 4),    # verification: four rows a sequence, sliding layer
     (11, True, False, torch.bfloat16, 3),       # verification, full attention (per-token convolution taps)
+    (11, True, True, torch.float8_e4m3fn, 8),   # DFlash2's depth 7: eight rows a sequence on FP8 full attention, 24 gated rows
+    (7, True, False, torch.float8_e4m3fn, 2),   # two rows a sequence, sliding layer
 ])
 def test_kernel_visit_matches_the_reference_layer(index, fp4, message, kv_dtype, steps):
     """One layer visit of three sequences with different histories through the decode kernels (`decode_visit`: mix,
