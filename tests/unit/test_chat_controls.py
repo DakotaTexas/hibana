@@ -198,3 +198,14 @@ def test_constraints_are_built_for_the_served_targets_vocabulary(monkeypatch, ta
                 'messages': [{'role': 'user', 'content': 'hi'}], 'response_format': {'type': 'json_object'}})
     asyncio.run(scenario())
     assert built == [(vocab, tuple(targets.get(target).stop_token_ids))]
+
+
+def test_models_reports_the_served_context_length():
+    async def scenario():
+        app = create_app(SimpleNamespace(), SimpleNamespace(), SimpleNamespace(),
+                         {'model_path': 'RadixArk/Test', 'context_length': 1000})
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url='http://test') as client:
+            data = (await client.get('/v1/models')).json()['data']
+        assert data == [{'id': 'RadixArk/Test', 'object': 'model', 'owned_by': 'hibana',
+                         'root': 'RadixArk/Test', 'max_model_len': 1000}]
+    asyncio.run(scenario())
