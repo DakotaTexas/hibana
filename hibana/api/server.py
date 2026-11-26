@@ -63,6 +63,8 @@ def create_app(engine: EngineLoop, tok: SnapshotTokenizer, tmpl: ChatTemplate, d
     """`vision`: the target's vision encoder (`model.vision`, engine/contracts.VisionEncoder) when it serves image
     input, else None."""
     MODEL_ID = describe.get("model_path", targets.DEFAULT_TARGET.model_id)  # the served checkpoint id, reported as the model name
+    from hibana.engine.config import current
+    model_alias = current().model_alias
     markers = media.Markers(tok, vision) if vision is not None else None
     chat_format = getattr(tmpl, "chat_format", "qwen")  # how the target frames a turn (`Target.chat_format`)
 
@@ -234,7 +236,7 @@ def create_app(engine: EngineLoop, tok: SnapshotTokenizer, tmpl: ChatTemplate, d
 
     @app.get("/v1/models")
     async def models():
-        return {"object": "list", "data": [{"id": MODEL_ID, "object": "model", "owned_by": "hibana",
+        return {"object": "list", "data": [{"id": model_alias or MODEL_ID, "object": "model", "owned_by": "hibana",
                                           "root": MODEL_ID,
                                           "max_model_len": describe.get("context_length", targets.DEFAULT_TARGET.context_length)}]}
 

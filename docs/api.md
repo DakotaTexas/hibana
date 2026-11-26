@@ -15,7 +15,7 @@ speculative scratch capacity.
 | `POST /generate` | Native text or token-ID input, output IDs and request metadata |
 | `POST /v1/tokenize` | Token counting/encoding |
 | `POST /flush_cache` | Invalidate reusable prefixes; locked prefixes drain safely |
-| `GET /v1/models` | Supported model, including the served `max_model_len` |
+| `GET /v1/models` | Supported model, including the served `max_model_len` (the id is `HIBANA_MODEL_ALIAS` when set; `root` stays the checkpoint id) |
 | `GET /health` | Engine availability |
 | `GET /get_server_info` | Serving profile, scheduler, cache and speculation statistics |
 | `GET /metrics` | Metrics |

@@ -209,3 +209,17 @@ def test_models_reports_the_served_context_length():
         assert data == [{'id': 'RadixArk/Test', 'object': 'model', 'owned_by': 'hibana',
                          'root': 'RadixArk/Test', 'max_model_len': 1000}]
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('alias, expected_id', [('qwen3-coder', 'qwen3-coder'), ('', 'RadixArk/Test')])
+def test_models_lists_one_entry_with_the_alias_as_id_and_the_checkpoint_as_root(alias, expected_id):
+    from hibana.engine import config
+    async def scenario():
+        with config.using(config.current().replace(model_alias=alias)):
+            app = create_app(SimpleNamespace(), SimpleNamespace(), SimpleNamespace(),
+                             {'model_path': 'RadixArk/Test', 'context_length': 1000})
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url='http://test') as client:
+            data = (await client.get('/v1/models')).json()['data']
+        assert data == [{'id': expected_id, 'object': 'model', 'owned_by': 'hibana',
+                         'root': 'RadixArk/Test', 'max_model_len': 1000}]
+    asyncio.run(scenario())
