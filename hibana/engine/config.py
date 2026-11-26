@@ -89,6 +89,7 @@ class EngineConfig:
     flashnext_cache: str | None = None        # HIBANA_FLASHNEXT_CACHE: Flash-Next's model cache
     max_context: int | None = None            # HIBANA_MAX_CONTEXT (0/unset: the target's)
     max_batch: int = 4                        # HIBANA_MAX_BATCH: most requests decoded together, 1-128 (the throughput profile: 16)
+    max_queued: int = 0                       # HIBANA_MAX_QUEUED: requests queued before HTTP 429, at least the profile's (0: the profile's)
     cuda_arch: str = "12.1a"                  # HIBANA_CUDA_ARCH for the JIT-built CUDA kernels
     tp_allreduce: str = "rdma"                # HIBANA_TP_ALLREDUCE: rdma (the one-shot for decode-sized all-reduces between two ranks) or nccl (every one on NCCL, as vLLM)
     # --- weights and numerics
@@ -126,8 +127,6 @@ class EngineConfig:
     ssd: bool = False                         # HIBANA_SSD
     ssd_gib: float = 200.0                    # HIBANA_SSD_GIB: its capacity
     ssd_dir: str = SSD_DIR                    # HIBANA_SSD_DIR: where it stores
-    # --- HTTP API defaults
-    max_queued: int = 0                       # HIBANA_MAX_QUEUED: queue depth before HTTP 429 (0: profile default, at least two batches)
     # the SSD tier's tuning
     ssd_block_tokens: int = 256               # HIBANA_SSD_BLOCK_TOKENS: tokens per SSD KV block (divides the 2048-token prefill chunk)
     ssd_trace: bool = False                   # HIBANA_SSD_TRACE: one line per restore in <ssd dir>/v2/restores.jsonl
@@ -179,6 +178,7 @@ class EngineConfig:
             flashnext_cache=_str(e, "HIBANA_FLASHNEXT_CACHE"),
             max_context=_int(e, "HIBANA_MAX_CONTEXT", 0) or None,
             max_batch=_int(e, "HIBANA_MAX_BATCH", 4),
+            max_queued=_int(e, "HIBANA_MAX_QUEUED", 0),
             cuda_arch=_str(e, "HIBANA_CUDA_ARCH", "12.1a"),
             tp_allreduce=_str(e, "HIBANA_TP_ALLREDUCE", "rdma"),
             w3_decode=_flag(e, "HIBANA_W3_DECODE"),
@@ -213,7 +213,6 @@ class EngineConfig:
             ssd=_flag(e, "HIBANA_SSD"),
             ssd_gib=float(e.get("HIBANA_SSD_GIB") or "200"),
             ssd_dir=_str(e, "HIBANA_SSD_DIR", SSD_DIR),
-            max_queued=_int(e, "HIBANA_MAX_QUEUED", 0),
             ssd_block_tokens=_ssd_block(_int(e, "HIBANA_SSD_BLOCK_TOKENS", 256)),
             ssd_trace=_flag(e, "HIBANA_SSD_TRACE"),
             ssd_writers=_positive(e, "HIBANA_SSD_WRITERS", 4),
