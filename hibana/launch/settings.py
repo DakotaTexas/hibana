@@ -142,14 +142,17 @@ def profile_defaults(profile: str, target: str, flashnext_experts: str = "w3", t
         # experts, and a call reads at most 12 a request and 48 in all. LiveCodeBench v6 (454 problems, sampled with
         # thinking on, 256K cap, 16 requests, 3 seeds) paired against exact: DSpark -0.66 points (95% -2.42 to +0.95),
         # DFlash2 +0.07 (-1.69 to +1.84); keeping 2 (6:24, 12:48) lost 1.2 to 2.9 points at a 192K cap. Speed at T 1.0
-        # (18 h2h prompts, 1 / 4 / 8 / 16 requests) over exact: DSpark +20 / +9 / +26 / +17%, DFlash2 +22 / +25 / +16 /
-        # +17%.
+        # (18 h2h prompts, 1 / 4 / 8 / 16 requests, FP8 trunk) over no sharing: DSpark +20 / +9 / +26 / +17%, DFlash2
+        # +22 / +25 / +16 / +17%.
         p.update(HIBANA_MOE_KEEP="4", HIBANA_MOE_BUDGET="12:48")
         # sampled requests: soft acceptance s = 0.25. DSpark's drafts are single tokens, so the rule accepts a draft
         # with min(1, p e^s): GPQA (sampled, thinking on, 16 requests) 68.7% at s = 0.25 and at exact, 61.6% at
-        # s = 0.5 (longer answers, more at the cap). T 0.7 h2h: one request +11%, 2 / 4 streams +4%. Greedy requests
-        # stay exact: top-2 within 1.0 scored MMLU-Pro greedy 79.5% against 82.0% (p 0.27).
+        # s = 0.5 (longer answers, more at the cap). T 0.7 h2h: one request +11%, 2 / 4 streams +4%.
         p["HIBANA_ACCEPT_SOFT"] = "0.25"
+        # greedy requests: a draft within the target's top 2 and 0.5 logits of its top is accepted. Greedy h2h with
+        # throughput's settings, 1 / 4 / 8 / 16 requests: +12 / +7 / +9 / +9% against +14 / +12 / +8 / +14% at 2:1.0,
+        # which scored MMLU-Pro greedy 79.5% against 82.0% (p 0.27); top-3 within 2.0 77.0% against 83.5% (p 0.004)
+        p["HIBANA_ACCEPT_DEFAULT"] = "2:0.5"
         # gated to drafts the target ranks within its top 3 and within 2.0 nats of its top token: a draft outside takes
         # the exact test, so it never comes out more often than the target gives it. Speed at T 1.0 (one Spark, 18 h2h
         # prompts, no sharing, 1 / 4 / 8 / 16 requests) against exact: DSpark +7 / +5 / +4 / +6%, DFlash2 +4 / +10 / +6

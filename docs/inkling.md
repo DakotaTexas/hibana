@@ -14,8 +14,8 @@ It serves text only (the checkpoint's vision tower is not loaded) and drafts wit
 `exact` serves the checkpoint's own weights and verifies every draft exactly; `fast` (the default) and `throughput`
 quantize the attention projections and the vocabulary head to FP8 at load, share experts within a budget ([expert
 sharing](#expert-sharing)) and accept sampled requests' drafts softly within a gate ([relaxed
-verification](#relaxed-verification)), still verifying greedy requests exactly; `throughput` decodes up to 16 requests
-together.
+verification](#relaxed-verification)), and accept greedy requests' drafts within the target's top 2 and 0.5 logits;
+`throughput` decodes up to 16 requests together.
 Every profile keeps the SSD tier on, as the other targets do.
 
 ## The model
@@ -202,10 +202,10 @@ The cap is per call, min(B, P x requests), and each row's top F stays in past it
 12 a request up to 48 a call with either drafter; `exact` shares none.
 
 Accuracy, sampled at temperature 1.0 with thinking on, 16 requests a server, 3 seeds an arm, paired problem by problem
-with the same drafter's `exact` run (95% bootstrap intervals over problems). LiveCodeBench v6 (454 problems) at a 256K
+with the same drafter's exact arm (no sharing, exact verification; 95% bootstrap intervals over problems). LiveCodeBench v6 (454 problems) at a 256K
 output cap, every arm on one build: keep 4 with 12:48 DSpark 82.6% against 83.3% (-0.66, -2.42 to +0.95), DFlash2
 83.0% against 82.9% (+0.07, -1.69 to +1.84), with 2.4% and 1.8% of answers at the cap against 1.8% and 1.7%. At a
-192K cap, against each drafter's `exact` run (83.5% / 83.0%), and on GPQA Diamond (198, 120K cap) against its own:
+192K cap, against each drafter's exact arm (83.5% / 83.0%), and on GPQA Diamond (198, 120K cap) against its own:
 
 | Sharing | Experts a call reads at 16 requests | LiveCodeBench, DSpark / DFlash2 | GPQA change, DSpark / DFlash2 |
 |---|---|---|---|
@@ -217,14 +217,15 @@ output cap, every arm on one build: keep 4 with 12:48 DSpark 82.6% against 83.3%
 GPQA, at 16 settings from keep 2 to keep 6 and 6:24 to 64:128, stayed within 1.7 points of exact either way for
 DFlash2 and above it for DSpark; LiveCodeBench separates them. Experts a call reads come from replaying recorded router
 traffic. At temperature 1.0 over the 18 h2h prompts (thinking off, 1,024 tokens, one Spark), keep 4 with 12:48 decodes
-DSpark +20 / +9 / +26 / +17% and DFlash2 +22 / +25 / +16 / +17% over no sharing at 1 / 4 / 8 / 16 requests (`exact`
-acceptance).
+DSpark +20 / +9 / +26 / +17% and DFlash2 +22 / +25 / +16 / +17% over no sharing at 1 / 4 / 8 / 16 requests (FP8
+trunk, exact acceptance).
 
 ## Relaxed verification
 
 `fast` accepts sampled requests' drafts with soft acceptance s = 0.25, gated to drafts the target ranks within its
 top 3 and within 2.0 nats of its top token (`HIBANA_ACCEPT_SOFT_GATE=3:2.0`; a draft outside takes the exact test), and
-verifies greedy requests exactly. At temperature 1.0 (18 h2h prompts, one Spark, no sharing, 1 / 4 / 8 / 16 requests)
+accepts a greedy request's draft outright within the target's top 2 and 0.5 logits of its top
+(`HIBANA_ACCEPT_DEFAULT=2:0.5`). At temperature 1.0 (18 h2h prompts, one Spark, no sharing, 1 / 4 / 8 / 16 requests)
 the gated rule decodes DSpark +7 / +5 / +4 / +6% and DFlash2 +4 / +10 / +6 / +7% over exact acceptance, within noise
 of the ungated rule (+5 / +5 / +6 / +7% and +10 / +6 / +8 / +12%). The GPQA numbers below are the ungated rule's. DSpark's
 drafts are single tokens, so a drafted token y is accepted with probability min(1, p(y) e^s) instead of p(y): s scales
@@ -233,20 +234,22 @@ every batch size, paired with exact acceptance at 68.7%): s = 0.25 68.7% (53 ans
 61.6% (p 0.016, 67 at the cap, 1.09x the tokens). Sampled h2h (T 0.7) on `fast`, two passes each: one request
 66.5 -> 73.8 tok/s at s = 0.25 (75.1 at 0.5), 2 streams 85.0 -> 88.2, 4 streams 110.9 -> 114.8. Greedy relaxed
 acceptance cost MMLU-Pro greedy (200, thinking on): top-3 within 2.0 77.0% against 83.5% (p 0.004), top-2 within 1.0
-79.5% against 82.0% (p 0.27), so greedy requests stay exact.
+79.5% against 82.0% (p 0.27), so `fast` takes the narrower top-2 within 0.5: greedy h2h with `throughput`'s settings
++12 / +7 / +9 / +9% at 1 / 4 / 8 / 16 requests, against +14 / +12 / +8 / +14% at top-2 within 1.0.
 
-`fast` as served, the gated rule at s = 0.25 with keep 4 with 12:48 sharing, paired with the same build's `exact` (16
+`fast` as served, the gated rule at s = 0.25 with keep 4 with 12:48 sharing, paired with the same build's exact arm (16
 requests a server, LiveCodeBench v6 at 256K with 4 seeds, GPQA Diamond at 120K with 3): DSpark -0.66 points (-2.07 to
 +0.73) and -0.51 (-2.36 to +1.35), DFlash2 -0.07 (-1.89 to +1.69) and -0.51 (-2.86 to +2.02). At s = 0.5 the same
 stack lost LiveCodeBench 2.1 points with DSpark (-3.89 to -0.44) and 2.8 with DFlash2 (-4.77 to -0.73), its answers
 20-24% longer and more of them at the cap. At temperature 1.0 over the 18 h2h prompts (thinking off, 1,024 tokens, one
-Spark, drafts at every batch; 8 and 16 requests are `throughput`) it decodes, against `exact`:
+Spark, drafts at every batch; 8 and 16 requests are `throughput`) it decodes, against the FP8 trunk with exact
+acceptance and no sharing:
 
 | tokens/s | 1 | 4 | 8 | 16 requests |
 |---|---|---|---|---|
-| DSpark, `exact` | 62.2 | 107.5 | 156.4 | 246.2 |
+| DSpark, FP8 trunk | 62.2 | 107.5 | 156.4 | 246.2 |
 | DSpark, `fast` | 78.2 | 126.2 | 207.4 | 303.0 |
-| DFlash2, `exact` | 69.2 | 126.7 | 191.8 | 303.4 |
+| DFlash2, FP8 trunk | 69.2 | 126.7 | 191.8 | 303.4 |
 | DFlash2, `fast` | 93.0 | 164.7 | 241.4 | 369.4 |
 
 ## Memory

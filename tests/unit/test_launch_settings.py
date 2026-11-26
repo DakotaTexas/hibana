@@ -97,7 +97,8 @@ def test_inkling_drafts_with_dflash2_unless_told_dspark(env):
     assert s.proposer == "dflash2" and s.get("HIBANA_DRAFT") == "pinned"
     assert (s.get("HIBANA_ACCEPT_SOFT"), s.get("HIBANA_ACCEPT_SOFT_GATE")) == ("0.25", "3:2.0")
     assert s.engine_args()[s.engine_args().index("--accept-soft-gate") + 1] == "3:2.0"
-    assert "HIBANA_ACCEPT_SOFT_GATE" not in resolve(env, "inkling", "exact").values
+    e = resolve(env, "inkling", "exact")
+    assert "HIBANA_ACCEPT_SOFT_GATE" not in e.values and e.get("HIBANA_ACCEPT_DEFAULT") == "off"
     assert s.get("HIBANA_SPEC") == "7" and s.get("HIBANA_SPEC_DEPTHS") == "1:7,2:7,4:7"
     d = resolve({**env, "HIBANA_PROPOSER": "dspark"}, "inkling")
     assert d.proposer == "dspark" and d.get("HIBANA_SPEC_DEPTHS") == "1:3,2:3,4:3" and "--draft" not in d.engine_args()
@@ -105,6 +106,7 @@ def test_inkling_drafts_with_dflash2_unless_told_dspark(env):
         for profile in ("fast", "throughput"):
             r = resolve({**env, "HIBANA_PROPOSER": p}, "inkling", profile)
             assert (r.get("HIBANA_MOE_KEEP"), r.get("HIBANA_MOE_BUDGET")) == ("4", "12:48")
+            assert r.engine_args()[r.engine_args().index("--accept-default") + 1] == "2:0.5"
     t = resolve({**env, "HIBANA_PROPOSER": "dspark"}, "inkling", "throughput")
     assert t.get("HIBANA_SPEC_DEPTHS") == "1:3,2:3,4:3,8:3,16:3"
 
