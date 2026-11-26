@@ -364,15 +364,25 @@ def test_ssd_resume_matches_a_resume_from_memory(tmp_path, proposer):
         engine_config.install(before)
 
 
-def test_a_row_alone_matches_it_beside_another():
+def test_a_row_alone_matches_it_beside_another(monkeypatch):
     """On the pinned checkpoint: a one-token prefill against the same token as the first row of a two-token one, which
     sees only itself. A core pass's message sources must be copies: a single row's slice of the block states is a view
     of the slot the pass rewrites, so a one-row call (a one-token chunk, decode at one request) would read the new."""
+    from hibana.model.inkling import model as inkling_model
     model = load()
     ids = torch.tensor(chat_ids("Why does a lighthouse lens turn?")[:2], device=DEVICE)  # the template's first two
+    mixed = []  # prefill.mix's first inputs: the block states or their views, and the passes' message sources (one slot)
+    mix = inkling_model.prefill.mix
+    monkeypatch.setattr(inkling_model.prefill, "mix", lambda states, *a, **k: mixed.append(states) or mix(states, *a, **k))
     alone = model.logits(model.prefill(ids[:1])["norm"])
+    states = mixed[-1].untyped_storage().data_ptr()  # the output's mix reads the block states
+    sources = [s for s in mixed if s.shape[1] == 1]
+    assert len(sources) == 2 * 12 and all(s.untyped_storage().data_ptr() != states for s in sources)
     beside = model.logits(model.prefill(ids)["norm"][:1])
-    assert cosine(alone, beside) > 0.9984  # 0.9989-0.9990 with copies (alone, in the suite), 0.99787 reading the view
+    # The two calls take other GEMM paths (one row against two), which leaves ~1e-3: 0.99901 with copies, 0.99787 reading
+    # the view. The bug's size depends on the token (other pairs and visits do not separate it as well), so the storage
+    # check above is the regression test and this bounds the rest.
+    assert cosine(alone, beside) > 0.9984
 
 
 def test_dspark_covers_the_served_context():
