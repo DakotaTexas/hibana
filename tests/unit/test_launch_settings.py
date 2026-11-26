@@ -406,3 +406,9 @@ def test_adaptive_verification_for_dflash2_in_throughput(env):
     with pytest.raises(ValueError, match="HIBANA_SPEC_POLICY=budget"):
         resolve(env, "nemotron", "fast", overrides={"HIBANA_SPEC_POLICY": "budget"})
     assert resolve(env, "27b", "throughput", overrides={"HIBANA_SPEC_DEPTHS": "16:4"}).get("HIBANA_SPEC_POLICY") == "budget"
+
+
+def test_max_queued_validation(env):
+    assert resolve({**env, "HIBANA_MAX_QUEUED": "4096"}, "flashnext").get("HIBANA_MAX_QUEUED") == "4096"
+    with pytest.raises(ValueError, match="HIBANA_MAX_QUEUED"):
+        resolve({**env, "HIBANA_MAX_QUEUED": "-1"}, "flashnext")

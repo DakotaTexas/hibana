@@ -89,6 +89,7 @@ class EngineConfig:
     flashnext_cache: str | None = None        # HIBANA_FLASHNEXT_CACHE: Flash-Next's model cache
     max_context: int | None = None            # HIBANA_MAX_CONTEXT (0/unset: the target's)
     max_batch: int = 4                        # HIBANA_MAX_BATCH: most requests decoded together, 1-128 (the throughput profile: 16)
+    max_queued: int = 0                       # HIBANA_MAX_QUEUED: requests queued before HTTP 429, at least the profile's (0: the profile's)
     cuda_arch: str = "12.1a"                  # HIBANA_CUDA_ARCH for the JIT-built CUDA kernels
     tp_allreduce: str = "rdma"                # HIBANA_TP_ALLREDUCE: rdma (the one-shot for decode-sized all-reduces between two ranks) or nccl (every one on NCCL, as vLLM)
     # --- weights and numerics
@@ -159,6 +160,8 @@ class EngineConfig:
         for name, v in (("HIBANA_MOE_KEEP", self.moe_keep), ("HIBANA_MOE_BUDGET", self.moe_budget)):
             if v < 0:
                 raise ValueError(f"{name}={v}: a count of experts, or 0 (off)")
+        if self.max_queued < 0:
+            raise ValueError(f"HIBANA_MAX_QUEUED={self.max_queued}: must be a non-negative integer")
 
     @property
     def ssd_buffers(self) -> dict[str, int]:
@@ -176,6 +179,7 @@ class EngineConfig:
             flashnext_cache=_str(e, "HIBANA_FLASHNEXT_CACHE"),
             max_context=_int(e, "HIBANA_MAX_CONTEXT", 0) or None,
             max_batch=_int(e, "HIBANA_MAX_BATCH", 4),
+            max_queued=_int(e, "HIBANA_MAX_QUEUED", 0),
             cuda_arch=_str(e, "HIBANA_CUDA_ARCH", "12.1a"),
             tp_allreduce=_str(e, "HIBANA_TP_ALLREDUCE", "rdma"),
             w3_decode=_flag(e, "HIBANA_W3_DECODE"),

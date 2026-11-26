@@ -59,10 +59,12 @@ prompt tokens reused from the prefix cache as
 cached tokens and speculative work when used. `/generate` and OpenAI routes
 have different response schemas.
 
-Queue saturation returns 429. An unavailable engine returns 503; a stream
-already in progress reports an SSE error. Client disconnects cancel their
-requests. Cache flush acknowledges invalidation; locked storage may remain
-until its readers finish, reported by `flush_pending`.
+Queue saturation returns 429 (`HIBANA_MAX_QUEUED` raises the queue
+limit above the profile's, at least two batches). An unavailable engine
+returns 503; a stream already in progress reports an SSE error. Client
+disconnects cancel their requests. Cache flush acknowledges invalidation;
+locked storage may remain until its readers finish, reported by
+`flush_pending`.
 
 The chat routes (`/v1/chat/completions`, `/v1/messages`) also tell the prefix cache where the prompt's last message
 starts (`SamplingParams.message_boundary`, from one more render of the conversation without it). Each prefill places

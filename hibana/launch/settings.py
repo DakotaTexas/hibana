@@ -458,6 +458,7 @@ def resolve(target: str | None = None, profile: str | None = None, overrides: di
     _check(kv_format == "fp8" or not TARGET_SETTINGS[name].get("fp8_kv_only"), f"{name} serves an FP8 KV cache only (HIBANA_KV_FORMAT=fp8): NVFP4 KV is not supported for it yet")
     _check(values.get("HIBANA_DRAFT_VOCAB", "0").isdigit(), "HIBANA_DRAFT_VOCAB must be a row count (0 = the full lm_head)")
     _check(values.get("HIBANA_SSD", "0") in ("0", "1"), "HIBANA_SSD must be 0 or 1")
+    _check(values.get("HIBANA_MAX_QUEUED", "0").isdigit(), "HIBANA_MAX_QUEUED must be a request count (0 = the profile's)")
     block = values.get("HIBANA_SSD_BLOCK_TOKENS", "256")
     _check(block.isdigit() and int(block) > 0 and 2048 % int(block) == 0, "HIBANA_SSD_BLOCK_TOKENS must divide 2048")
     _check(re.fullmatch(r"[0-9]+(\.[0-9]+)?", values.get("HIBANA_SSD_GIB", "200")) is not None, "HIBANA_SSD_GIB must be a number of GiB")
