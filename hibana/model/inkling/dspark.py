@@ -52,7 +52,6 @@ class InklingDraft:
             a = p + "self_attn."
             self.blocks.append({
                 "input_norm": w.pop(p + "input_layernorm.weight").float(), "post_norm": w.pop(p + "post_attention_layernorm.weight").float(),
-                "context_norm": w.pop(p + "dflare_norm.weight").float(),
                 "qkv": torch.cat([w.pop(a + "q_proj.weight"), w.pop(a + "k_proj.weight"), w.pop(a + "v_proj.weight")]).contiguous(),
                 "context_kv": torch.cat([w.pop(a + "k_proj_ctx.weight"), w.pop(a + "v_proj_ctx.weight")]).contiguous(),
                 "o": w.pop(a + "o_proj.weight"), "q_norm": w.pop(a + "q_norm.weight").float(), "k_norm": w.pop(a + "k_norm.weight").float(),
@@ -62,7 +61,7 @@ class InklingDraft:
             })
         m = "markov_head."
         self.head_norm = w.pop(m + "dflare_norm.weight").float()
-        self.context_norms = torch.stack([block["context_norm"] for block in self.blocks])
+        self.context_norms = torch.stack([w.pop(f"layers.{i}.dflare_norm.weight").float() for i in range(self.layers)])
         self.token_embed = w.pop(m + "markov_w1.weight")  # [padded vocabulary, rank]
         rnn = w.pop(m + "rnn_proj.weight").float()  # [3 rank, 2 rank + 2 H]: over [state | previous token | hidden | f_rnn]
         self.rnn_state, self.rnn_context = rnn[:, :2 * self.rank].contiguous(), rnn[:, 2 * self.rank:].contiguous()
@@ -103,10 +102,11 @@ class InklingDraft:
         return kernels.rms(x.reshape(-1, x.shape[-1]).contiguous(), weight, self.eps).view(x.shape)
 
     def write_context(self, taps: list[torch.Tensor], positions: torch.Tensor, pages: torch.Tensor, rows: torch.Tensor | None = None) -> None:
-        """Committed positions' context K/V into their pages: taps, the target's features at the draft's four visits
-        (BF16 [N, H] each), at `rows` (int64 [T], or all N) at `positions` [T]. A layer's mix and norm are one kernel
-        for all layers, then per layer the projection and one kernel for the key's norm, its rotation and both pages
-        (in PyTorch the commit took about 50 launches and three host syncs a round)."""
+        """Committed positions' context K/V into their pages: taps, the target's features at the draft's three visits
+        and the target's final norm (BF16 [N, H] each), at `rows` (int64 [T], or all N) at `positions` [T]. A
+        layer's mix and norm are one kernel for all layers, then per layer the projection and one kernel for the
+        key's norm, its rotation and both pages (as PyTorch operators the commit is about 50 launches and three
+        host syncs a round)."""
         mixed = draft_kernels.mix_norm(taps, self.alpha[:self.layers], self.context_norms, self.eps, rows)
         kv_size = self.kv_heads * self.head_dim
         for i, (block, (keys, values)) in enumerate(zip(self.blocks, self.caches)):
@@ -154,7 +154,7 @@ class InklingDraft:
             draft_kernels.norm_rotate(qkv, q_size, self.kv_heads, block_w["k_norm"], row_positions, self.cos, self.sin, self.eps,
                                       values=(qkv, q_size + kv_size), caches=(keys, values), pages=flat_pages)
             attn = kernels.attention(q, None, fixed["no_sink"], (keys, values), indptr, indices, fixed["row_seq"], seen,
-                                     self.window + block if self.local[i] else None, self.head_dim ** -0.5)
+                                     self.window + block if self.local[i] else None, self.head_dim ** -0.5, steps=block)
             draft_kernels.linear(attn.view(rows, q_size), block_w["o"], residual=residual)
             h = self.rms(residual, block_w["post_norm"])
             draft_kernels.linear(draft_kernels.linear(h, block_w["gate_up"], swiglu=True), block_w["down"], residual=residual)

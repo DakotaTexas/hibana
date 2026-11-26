@@ -133,25 +133,26 @@ request that resumes from a cached prefix finds its draft context in the pages i
 
 A round drafts the block and verifies the first 3 drafts (`HIBANA_SPEC_DEPTHS`): each verified row reads its own
 experts, and the drafts past the third are rarely reached. Past four requests `exact` decodes plainly and `throughput`
-keeps drafting (at 16 streams 243.3 tokens/s against 196.0); the drafter's context for each step's rows is then one batched commit
-(16 requests: 79.7 ms a step, against 83.4 a request at a time and 79.6 without the drafter). Drafts are the draft's argmax; a sampled request verifies them by
-rejection sampling. The draft runs in a CUDA graph per batch bucket and verify depth, about 7.6 ms a round with the
-BF16 head, nearly half of it the vocabulary head, which a round reads twice: once for the draft's logits, once for
-the verification's.
+keeps drafting (at 16 streams, FP8 trunk with keep 6 at 16:64 and exact acceptance: 243.3 tokens/s against 196.0 without
+the drafter, [DFlash2](#dflash2)'s second table); the drafter's context for each step's rows is then one batched commit
+(16 requests: 79.7 ms a step, against 83.4 a request at a time and 79.6 without the drafter). Drafts are the draft's
+argmax; a sampled request verifies them by rejection sampling. The draft runs in a CUDA graph per batch bucket and
+verify depth, about 7.6 ms a round with the BF16 head, nearly half of it the vocabulary head, which a round reads twice:
+once for the draft's logits, once for the verification's.
 
 Served on one GB10 over the 18 h2h prompts (chat, code, math, prose, structured; thinking off, up to 1,024 tokens;
 one request: the median of the prompts' decode tokens/s; streams: closed loop, all streams' tokens/s):
 
 | | 1 request, greedy | 1 request, T 0.7 | 2 streams | 4 streams |
 |---|---|---|---|---|
-| `fast` | 85.2 | 77.2 | 107.9 | 144.1 |
+| FP8 trunk, keep 4 with 6:48 sharing, exact acceptance | 85.2 | 77.2 | 107.9 | 144.1 |
 | FP8 trunk without expert sharing | 68.5 | 65.7 | 84.5 | 109.9 |
 | `exact` | 56.6 | 51.7 | 72.7 | 99.9 |
 | BF16 trunk, no drafter (`--exact --spec 0`) | 39.6 | 38.9 | 61.0 | 85.7 |
 
-The drafter earns most on math and structured output (`fast`, greedy: 81 and 75 tokens/s) and least on prose (52).
-Cold real-text prompts of 2,000, 9,300 and 17,000 tokens prefill at 3,800-3,900 tokens/s in `exact` and about 4,000
-in `fast`.
+The drafter earns most on math and structured output (FP8 trunk with 6:48 sharing, greedy: 81 and 75 tokens/s) and
+least on prose (52). Cold real-text prompts of 2,000, 9,300 and 17,000 tokens prefill at 3,800-3,900 tokens/s in
+`exact` and about 4,000 in `fast`.
 
 ## DFlash2
 
@@ -227,10 +228,10 @@ top 3 and within 2.0 nats of its top token (`HIBANA_ACCEPT_SOFT_GATE=3:2.0`; a d
 accepts a greedy request's draft outright within the target's top 2 and 0.5 logits of its top
 (`HIBANA_ACCEPT_DEFAULT=2:0.5`). At temperature 1.0 (18 h2h prompts, one Spark, no sharing, 1 / 4 / 8 / 16 requests)
 the gated rule decodes DSpark +7 / +5 / +4 / +6% and DFlash2 +4 / +10 / +6 / +7% over exact acceptance, within noise
-of the ungated rule (+5 / +5 / +6 / +7% and +10 / +6 / +8 / +12%). The GPQA numbers below are the ungated rule's. DSpark's
-drafts are single tokens, so a drafted token y is accepted with probability min(1, p(y) e^s) instead of p(y): s scales
-every draft's acceptance directly. GPQA Diamond (198, sampled, thinking on, `exact` with 16 requests, drafts verified at
-every batch size, paired with exact acceptance at 68.7%): s = 0.25 68.7% (53 answers at the cap against 51); s = 0.5
+of the ungated rule (+5 / +5 / +6 / +7% and +10 / +6 / +8 / +12%). DSpark's drafts are single tokens, so a drafted token
+y is accepted with probability min(1, p(y) e^s) instead of p(y): s scales every draft's acceptance directly. GPQA
+Diamond (198, sampled, thinking on, ungated rule, `exact` with 16 requests, drafts verified at every batch size, paired
+with exact acceptance at 68.7%): s = 0.25 68.7% (53 answers at the cap against 51); s = 0.5
 61.6% (p 0.016, 67 at the cap, 1.09x the tokens). Sampled h2h (T 0.7) on `fast`, two passes each: one request
 66.5 -> 73.8 tok/s at s = 0.25 (75.1 at 0.5), 2 streams 85.0 -> 88.2, 4 streams 110.9 -> 114.8. Greedy relaxed
 acceptance cost MMLU-Pro greedy (200, thinking on): top-3 within 2.0 77.0% against 83.5% (p 0.004), top-2 within 1.0

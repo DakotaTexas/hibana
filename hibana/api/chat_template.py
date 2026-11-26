@@ -58,7 +58,7 @@ class ChatTemplate:
         **kwargs,
     ) -> str:
         if self.chat_format == "inkling" and not enable_thinking:
-            kwargs.setdefault("reasoning_effort", self.defaults.get("reasoning_effort", "none"))  # thinking off: effort 0
+            kwargs.setdefault("reasoning_effort", "none")  # thinking off: effort 0
         return self._template.render(
             messages=messages,
             add_generation_prompt=add_generation_prompt,

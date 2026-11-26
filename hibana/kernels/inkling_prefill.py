@@ -3,7 +3,7 @@
 
 Prefill: `route` and `place` pick and sort a call's (token, expert) pairs on the GPU; `quantize_nvfp4`,
 `quantize_mxfp8` and `swiglu_quantize` quantize the experts' inputs as hf_quant_config.json requires; `grouped_mm4`
-and `grouped_mm8` multiply every expert in one block-scaled tensor-core launch a projection (a GEMM an expert took
+and `grouped_mm8` multiply every expert in one block-scaled tensor-core launch a projection (a GEMM an expert costs
 12 ms a visit). `conv`, `mix`, `gate`, `queries` and `attention` are the steps between.
 
 Decode and verification calls of up to `PAIR_ROWS` rows: `pair_mm` multiplies each (row, expert) pair where it is;
@@ -21,7 +21,7 @@ from triton.language.extra.cuda import libdevice
 
 
 # Token and pair counts reach the kernels as runtime values that Triton does not specialize on (do_not_specialize):
-# specialized, every new prompt length compiled fresh variants, about 7 s of a served request's first token.
+# specialized, every new prompt length would compile fresh variants, about 7 s of a served request's first token.
 FP32_MAX = tl.constexpr(3.4028234663852886e38)
 SPLIT_ROWS = 64  # calls up to this many rows (decode, verification) quantize a row in many programs
 
@@ -205,7 +205,7 @@ SPLIT_ROUTE_ROWS = 512  # calls up to this many rows route in two launches (`rou
 
 
 def route(x: torch.Tensor, router: torch.Tensor, bias: torch.Tensor, topk: int, scale: float) -> tuple[torch.Tensor, torch.Tensor]:
-    """A wide call's routing in one launch: x [T, H] and router [E, H] BF16, bias [E] FP32 -> (ids int64 [T, topk],
+    """A wide call's routing: x [T, H] and router [E, H] BF16, bias [E] FP32 -> (ids int64 [T, topk],
     by expert; weights FP32 [T, topk] = scale x score / sum of the chosen scores), the top experts by sigmoid score
     plus bias."""
     t, h = x.shape
@@ -213,7 +213,7 @@ def route(x: torch.Tensor, router: torch.Tensor, bias: torch.Tensor, topk: int, 
     ids = torch.empty((t, topk), dtype=torch.int64, device=x.device)
     weights = torch.empty((t, topk), dtype=torch.float32, device=x.device)
     if t > SPLIT_ROUTE_ROWS:
-        # 32 rows a program: 50 us for 1,678 tokens (16: 73, 64: 61), where PyTorch's chain took 180
+        # 32 rows a program: 50 us for 1,678 tokens (16: 73, 64: 61), against 180 for PyTorch's chain
         _route[(triton.cdiv(t, 32),)](x, router, None, bias, ids, weights, t, H=h, E=experts, TOPK=topk, SCALE=scale, BM=32, BK=64,
                                       SUMMED=False, num_warps=4, enable_fp_fusion=False)
     elif t:
@@ -613,9 +613,10 @@ def conv(full: torch.Tensor, taps: torch.Tensor, dynamic: torch.Tensor | None = 
          out_dtype: torch.dtype = torch.bfloat16, clip: float | None = None, rms_eps: float | None = None) -> torch.Tensor:
     """c[t] = BF16((sum_j tap_j full[t + 3 - j] + full[t + 3]) / sqrt(taps + 1)) over a sequence: full [T + 3, C] BF16 is
     the stream's three inputs before the forward, then its rows. taps [C, 4] FP32, oldest first; with `dynamic`
-    [T, C / 128, 4] (a full-attention layer's key or value stream) taps are [C, 4] by backward distance and the row's
-    per-head taps are added. -> c; or with `add` [T, C] (FP32 or BF16) add + c, as `out_dtype`; or, each head of 128
-    apart, c clipped to an L2 norm of `clip` (keys) or RMS-normalized with `rms_eps` (values), BF16."""
+    [T, C / 128, 4] (a full-attention layer's key or value stream) taps are [C, 4] by backward distance, the row's
+    per-head taps are added and the divisor is sqrt(2 taps + 1). -> c; or with `add` [T, C] (FP32 or BF16) add + c,
+    as `out_dtype`; or, each head of 128 apart, c clipped to an L2 norm of `clip` (keys) or RMS-normalized with
+    `rms_eps` (values), BF16."""
     t, c = full.shape[0] - 3, full.shape[1]
     out = torch.empty((t, c), dtype=out_dtype, device=full.device)
     if t:
@@ -930,12 +931,12 @@ def _attention(Q, K, V, Rel, PQ, Index, Out, tokens, keys_total, q_start, k_star
     offs = tl.arange(0, D)
     q = tl.load(Q + row[:, None] * D + offs[None, :], mask=valid[:, None], other=0.0)
     if FP8:  # E4M3 keys convert to FP16 in one instruction a pair, to BF16 in three: FP16 queries (exact from BF16 unless
-        q = q.to(tl.float16)  # |q| < 2^-14, a score change under 1e-5) took a 32,000-key chunk from 18.5 to 14.5 ms
+        q = q.to(tl.float16)  # |q| < 2^-14, a score change under 1e-5): a 32,000-key chunk 14.5 ms against 18.5
     m_i = tl.full([BLOCK_M], float("-inf"), tl.float32)
     l_i = tl.zeros([BLOCK_M], tl.float32)
     acc = tl.zeros([BLOCK_M, D], tl.float32)
     # a full-attention tile at 32k keys spends over 90% of its blocks here: without the bias gather and masks a chunk
-    # of 2,048 tokens over 32,000 keys took 18.5 ms instead of 23.8 (FP8 pool), 14.7 instead of 37.3 (BF16)
+    # of 2,048 tokens over 32,000 keys took 18.5 ms against 23.8 (FP8 pool, BF16 queries), 14.7 against 37.3 (BF16)
     for n in range(lo, far):
         m_i, l_i, acc = _attention_block(q, m_i, l_i, acc, K, V, Rel, Index, n, hi, kv_head, row, valid, pos, k_start, scale * LOG2E,
                                          H, G, D, E, WINDOW, FP8, BLOCK_N, False)
@@ -960,7 +961,7 @@ def attention(q: torch.Tensor, rel: torch.Tensor, pq: torch.Tensor, gate_at: int
     and v [rows, 8, 128], BF16 or E4M3. A row attends the keys up to its own position, the last `window` of them in a
     sliding-window layer; the sink logit joins the softmax and its share is dropped. -> BF16 [T, 24, 128].
 
-    A tile of 42 tokens (their three query heads of one KV head) streams its key blocks through two tensor-core
+    A tile of up to 42 tokens (their three query heads of one KV head) streams its key blocks through two tensor-core
     products with an online softmax between, as vLLM's SM12x attention does (see THIRD_PARTY_NOTICES.md)."""
     tokens, heads, dim = q.shape
     group = heads // k.shape[1]
@@ -995,7 +996,7 @@ def _softcap(X, Y, stride, N: tl.constexpr, INV: tl.constexpr, CAP: tl.constexpr
 def softcap(logits: torch.Tensor, n: int, cap: float) -> torch.Tensor:
     """The head's BF16 logits [R, >= n] -> FP32 [R, n] = cap tanh(logits[:, :n] / cap), in one pass: the bits of
     `torch.tanh(logits[:, :n].float() / cap) * cap` (PyTorch divides by a scalar as a product with its FP32
-    reciprocal), which took four passes over FP32 rows (128 rows: 3.41 -> 0.66 ms a verify round)."""
+    reciprocal), which makes four passes over FP32 rows (128 rows: 0.66 ms a verify round against 3.41)."""
     rows = logits.shape[0]
     out = torch.empty((rows, n), dtype=torch.float32, device=logits.device)
     if rows:

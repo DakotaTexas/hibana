@@ -1,7 +1,8 @@
 """Token sampling: greedy fast path, then temperature / top-k / top-p.
 
-Defaults mirror the checkpoint's generation_config (temperature 1.0, top_k 20,
-top_p 0.95) when a request does not set them; temperature 0 means greedy.
+Defaults when a request does not set them: top_k 20 and top_p 0.95 (Hibana's, not
+every checkpoint's generation_config: the fused sampled verify needs a top_k), and
+temperature 1.0 on the chat APIs, 0 (greedy) elsewhere. temperature 0 means greedy.
 """
 
 from __future__ import annotations

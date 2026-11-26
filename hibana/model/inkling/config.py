@@ -10,6 +10,7 @@ the layer whose weights it runs and the pass it belongs to.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 MODEL_ID = "thinkingmachines/Inkling-2-Mini"
@@ -64,6 +65,8 @@ NUM_VISITS = len(VISITS)
 KV_SIZE = NUM_KV_HEADS * HEAD_DIM
 CONV_STREAMS = {"k": (0, KV_SIZE), "v": (KV_SIZE, KV_SIZE), "attn": (2 * KV_SIZE, HIDDEN_SIZE), "mlp": (2 * KV_SIZE + HIDDEN_SIZE, HIDDEN_SIZE)}
 CONV_WIDTH = 2 * KV_SIZE + 2 * HIDDEN_SIZE
+CONV_STATE_SHAPE = (NUM_VISITS, CONV_KERNEL - 1, CONV_WIDTH)  # a state slot's windows, BF16
+CONV_STATE_BYTES = math.prod(CONV_STATE_SHAPE) * 2
 
 # Resident weights: the packed experts (12.4 GiB), the BF16 trunk, embeddings and head (3.6 GiB), the routers and
 # gates, the drafter; the load stages one layer's experts at a time.

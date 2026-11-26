@@ -44,10 +44,10 @@ constexpr int kPartial = 2 + kHeadDim;  // a split's running maximum, weight sum
 
 // grid (rows / group * kv_heads, splits): a block scores a share of the keys of `group` consecutive rows of one
 // sequence (the pending token and its drafts) for the KV head's three query heads, in chunks of 96 with a running
-// maximum. The rows share each key's load and mask the keys they do not see (four rows over 32k keys: 1,323 us as a
-// block a row, 428 shared). Four threads a key read its K, V and bias rows a chunk ahead; then a thread a (head,
-// dimension) sums the weighted values from shared memory. The bias of distance d < extent is BF16(rel . proj[d]).
-// Two- and four-row blocks are held to two a multiprocessor (four rows at 32k keys 909 -> 869 us).
+// maximum. The rows share each key's load and mask the keys they do not see (four FP8 rows over 32k cold keys:
+// 1,323 us as a block a row, 428 shared). Four threads a key read its K, V and bias rows a chunk ahead; then a thread
+// a (head, dimension) sums the weighted values from shared memory. The bias of distance d < extent is
+// BF16(rel . proj[d]). Two- and four-row blocks are held to two a multiprocessor (faster at four rows over 32k keys).
 template <bool kFp8, int R>
 __global__ void __launch_bounds__(kAttnThreads, R == 2 || R == 4 ? 2 : 1) attention_kernel(
     const uint16_t* __restrict__ q, const float* __restrict__ rel, const uint16_t* __restrict__ proj, const uint8_t* __restrict__ k_pool,
@@ -70,8 +70,8 @@ __global__ void __launch_bounds__(kAttnThreads, R == 2 || R == 4 ? 2 : 1) attent
   __shared__ float stat[2 * RH];                                     // the running maxima; what the sums so far shrink by
   __shared__ __align__(16) float weight[RH * chunk];                 // a chunk's softmax weights
   // its V rows, [dimension][key]; a quarter q of the dimensions keeps key j at column j ^ 8q, else the four quarters'
-  // stores of one key land in one bank (rows 32 apart). With the queries' padded stride and E4M3 converted by the
-  // hardware instead of a shared table (random indices, bank conflicts), four rows at 32k keys took 870 -> 460 us
+  // stores of one key land in one bank (rows 32 apart). E4M3 is converted by the hardware, not through a shared table,
+  // whose random indices conflict on banks
   __shared__ __align__(16) uint8_t staged[kHeadDim * chunk * elem];
 
   const int g = blockIdx.x % kv_heads, split = blockIdx.y;
@@ -398,7 +398,7 @@ __global__ void __launch_bounds__(kHeadDim) attention_merge_kernel(const float* 
 
 // ---------------------------------------------------------------------------------------------------- decode glue
 //
-// The steps between a decode row's projections, one launch each: `mix`, `conv`, `prep` and `route`.
+// The steps between a decode row's projections: `mix` (four launches when gated, else one), `conv`, `prep` and `route`.
 
 constexpr int kMixThreads = 256;
 constexpr int kMixPer = 9;  // values a thread holds: a row of 2,304 over the block
@@ -616,14 +616,14 @@ __global__ void __launch_bounds__(kMixThreads) rms_kernel(const void* __restrict
   }
 }
 // The message gate, m <- (1 - tanh(forget low)) m + tanh(gain low) msg with low = down [rms(m); rms(msg)], then
-// rms(m) * weight. A gate reads 1.8 MB of weights, so `low` runs on `gemv` and the steps after it spread over many
-// blocks (one block took 300 us).
+// rms(m) * weight. A gate reads 1.2 MB of weights, so `low` runs on `gemv` (`bmm` past four rows) and the steps after
+// it spread over many blocks (one block took 300 us).
 
 // grid (H / 64, outputs, ceil(rows / R)): the gated values in place, and each (row, 64 channels)'s sum of their
 // squares. Four threads a channel each hold a quarter of the channel's forget and gain rows (rank 64) in registers and
-// run the block's R rows past them, so a gate's 0.6 MB of forget and gain weights are read once per R rows (a block a
-// (row, 64 channels) re-read them every row: 0.28 ms at 128 rows of three gates). Each value and sum is the same
-// arithmetic in the same order as there: a quarter's 16 products in order, the quarters added in order, `block_sum`'s.
+// run the block's R rows past them, so a gate's 0.6 MB of forget and gain weights are read once per R rows, not once
+// per row (that took 0.28 ms at 128 rows of three gates). Each value is a quarter's 16 products in order, the quarters
+// added in order, and each sum is in `block_sum`'s order, so a row's results do not depend on R.
 // low: row r of gate j at low + r * low_row + j * low_out, BF16; forget, gain [G, H, 64] BF16; squares [outputs * rows, H / 64].
 template <int R>
 __global__ void __launch_bounds__(256) gate_apply_kernel(float* __restrict__ gated, const float* __restrict__ message,
@@ -733,12 +733,12 @@ __device__ __forceinline__ float conv_step(const Stream& in, int j, uint16_t* __
 // the row replaces the stored one) or [sequences, win_steps, visits, 3, width], the window after each row.
 __global__ void __launch_bounds__(256) conv_kernel(
     const uint16_t* __restrict__ x, const float* __restrict__ taps, uint16_t* __restrict__ state, const int32_t* __restrict__ slots,
-    int64_t visit_elems, int64_t at, int64_t width, uint16_t* __restrict__ windows, int steps, int win_steps,
+    int64_t slot_elems, int64_t at, int64_t width, uint16_t* __restrict__ windows, int steps, int win_steps,
     const uint16_t* __restrict__ hidden_in, float* __restrict__ residual, uint16_t* __restrict__ out, int mode, int hidden) {
   const int row = blockIdx.x, h = blockIdx.y * 256 + threadIdx.x;
   const int seq = row / steps, j = row % steps;
-  uint16_t* window = state + slots[seq] * visit_elems + at;
-  uint16_t* after = windows == nullptr ? window : windows + (static_cast<int64_t>(seq) * win_steps + j) * visit_elems + at;
+  uint16_t* window = state + slots[seq] * slot_elems + at;
+  uint16_t* after = windows == nullptr ? window : windows + (static_cast<int64_t>(seq) * win_steps + j) * slot_elems + at;
   const int64_t base = static_cast<int64_t>(row) * hidden;
   const Stream in{x + static_cast<int64_t>(seq) * steps * hidden + h, hidden, window + h, width};
   const float c = round_bf16((conv_step(in, j, after + h, taps + 4 * h) + bf16_to_float(x[base + h])) * rsqrtf(5.f));
@@ -777,13 +777,14 @@ constexpr int kPrepThreads = 1024;
 //   q = clip(pq_q * q_scale) (* tau);  rel = clip(pq_r * r_scale) (* tau) rounded to BF16 (FP32 [rows, heads, d_rel]:
 //   the attention kernel multiplies it by the bias projection for the keys it reads);  sink FP32
 //   k = clip(BF16((conv(pk) + pk) / n)),  v = rms(BF16((conv(pv) + pv) / n)), written to page `pages[row]` of the pools
+//   (n = sqrt(5), sqrt(9) for full)
 //   taps: [kv, 4] the current token last (sliding), or [kv, 4] by backward distance plus the row's dynamic taps (full)
 template <bool kFp8>
 __global__ void __launch_bounds__(kPrepThreads) prep_kernel(
     const uint16_t* __restrict__ pq, int64_t pq_stride, const uint16_t* __restrict__ pk, const uint16_t* __restrict__ pv,
     int64_t pkv_stride, const float* __restrict__ q_scale, const float* __restrict__ r_scale,
     const float* __restrict__ k_taps, const float* __restrict__ v_taps, const int64_t* __restrict__ positions,
-    uint16_t* __restrict__ state, const int32_t* __restrict__ slots, int64_t visit_elems, int64_t at, int64_t width,
+    uint16_t* __restrict__ state, const int32_t* __restrict__ slots, int64_t slot_elems, int64_t at, int64_t width,
     uint16_t* __restrict__ windows, int steps, int win_steps, uint8_t* __restrict__ k_pool, uint8_t* __restrict__ v_pool, const int32_t* __restrict__ pages,
     uint16_t* __restrict__ q_out, float* __restrict__ rel_out, float* __restrict__ sink_out,
     int heads, int kv_heads, int d_rel, bool full, float tau_floor, float tau_alpha, float qk_clip, float rel_clip) {
@@ -831,8 +832,8 @@ __global__ void __launch_bounds__(kPrepThreads) prep_kernel(
     const float* taps = key ? k_taps : v_taps;
     const int seq = row / steps, j = row % steps;
     const int64_t stream_at = at + (key ? 0 : kv);
-    uint16_t* window = state + slots[seq] * visit_elems + stream_at;
-    uint16_t* after = windows == nullptr ? window : windows + (static_cast<int64_t>(seq) * win_steps + j) * visit_elems + stream_at;
+    uint16_t* window = state + slots[seq] * slot_elems + stream_at;
+    uint16_t* after = windows == nullptr ? window : windows + (static_cast<int64_t>(seq) * win_steps + j) * slot_elems + stream_at;
     const uint16_t* first = (key ? pk : pv) + static_cast<int64_t>(seq) * steps * pkv_stride;
     const float norm = rsqrtf(full ? 9.f : 5.f);
     for (int i = t; i < kv; i += kPrepThreads) {
@@ -983,9 +984,9 @@ __device__ __forceinline__ void grid_launch() { asm volatile("griddepcontrol.lau
 // y[m, n] = BF16(s sum_k x[m, k] w[n, k]) in FP32 for a BF16 matrix, or an E4M3 one with an FP32 scale s (the
 // activations stay BF16): decode's attention projections, head and message gates' low projection. A row is split
 // among ceil(row bytes / 1536) warps, each loading its bytes before anything else; the row's first warp adds the
-// partial sums in order, so a row's result does not depend on M. Against a warp a row: a visit's projections
-// 168 -> 162 us, the head 3.86 -> 3.70 ms. Up to three stacked matrices (from rows `first` and `second`) each read
-// their own x ([S, M, K]) or all the same ([M, K]): a visit's query, key and value in one launch.
+// partial sums in order, so a row's result does not depend on M. Against a warp a row, BF16 at one row: a visit's
+// projections 168 -> 162 us, the head 3.86 -> 3.70 ms. Up to three stacked matrices (from rows `first` and `second`)
+// each read their own x ([S, M, K]) or all the same ([M, K]): a visit's query, key and value in one launch.
 template <int M, bool FP8>
 __global__ void __launch_bounds__(kGemvMaxSplit * kGemvPerBlock * 32) gemv_kernel(const uint16_t* __restrict__ x, const uint8_t* __restrict__ w,
                                                                                   const float* __restrict__ scales, uint16_t* __restrict__ out,
@@ -1259,13 +1260,13 @@ torch::Tensor mix(torch::Tensor states, int64_t count, torch::Tensor partial, to
 #define LAUNCH_GATE(R)                                                                                                                  \
   gate_apply_kernel<R><<<dim3(hidden / 64, outputs, (rows + (R) - 1) / (R)), 256, 0, stream>>>(vp, gp, lp, low_row, low_out, fp, np, \
                                                                                               squares.data_ptr<float>(), rows, g0, hidden)
-    if (rows <= 4) {  // rows a block: at 1-4 rows a block a row (as before, 2.5-14 -> 1.7-6 us), then the fastest measured
+    if (rows <= 4) {  // rows a block, the fastest measured: at 1-4 rows a block a row (1.7-6 us)
       LAUNCH_GATE(1);
     } else if (rows <= 16) {
       LAUNCH_GATE(4);
-    } else if (rows <= 64) {  // 64 rows: 50 -> 12 us (one gate), 143 -> 29 (three)
+    } else if (rows <= 64) {  // 64 rows: 12 us (one gate), 29 (three)
       LAUNCH_GATE(8);
-    } else {  // 128 rows: 97 -> 21 us, 284 -> 54
+    } else {  // 128 rows: 21 us, 54
       LAUNCH_GATE(16);
     }
 #undef LAUNCH_GATE
@@ -1287,7 +1288,8 @@ void check_steps(int rows, int64_t steps, const torch::Tensor& slots, const torc
 }
 
 // x [R, H] BF16; taps [H, 4] FP32; state [slots, visits, 3, width] BF16; slots, windows, steps: `check_steps`. mode
-// 0: -> residual [R, H] FP32; mode 1: `hidden` [R, H] BF16 -> residual; mode 2: `residual` [R, H] FP32 -> [R, H] BF16.
+// 0: -> residual [R, H] FP32; mode 1: `hidden_in` [R, H] BF16 -> residual; mode 2: `residual` [R, H] FP32 -> [R, H]
+// BF16.
 torch::Tensor conv(torch::Tensor x, torch::Tensor taps, torch::Tensor state, torch::Tensor slots, int64_t visit, int64_t offset,
                    torch::Tensor hidden_in, torch::Tensor residual, int64_t mode, torch::Tensor windows, int64_t steps) {
   const int rows = x.size(0), hidden = x.size(1);
@@ -1300,7 +1302,7 @@ torch::Tensor conv(torch::Tensor x, torch::Tensor taps, torch::Tensor state, tor
                   : mode == 0 || (hidden_in.scalar_type() == torch::kBFloat16 && hidden_in.is_contiguous() && hidden_in.numel() == x.numel()),
         "mode 2 reads an FP32 residual, mode 1 the BF16 hidden");
   auto stream = c10::cuda::getCurrentCUDAStream();
-  const int64_t width = state.size(3), visit_elems = state.size(1) * 3 * width;
+  const int64_t width = state.size(3), slot_elems = state.size(1) * 3 * width;
   torch::Tensor out;
   if (mode == 2) {
     out = torch::empty_like(x);
@@ -1309,7 +1311,7 @@ torch::Tensor conv(torch::Tensor x, torch::Tensor taps, torch::Tensor state, tor
   }
   conv_kernel<<<dim3(rows, hidden / 256), 256, 0, stream>>>(
       reinterpret_cast<const uint16_t*>(x.data_ptr()), taps.data_ptr<float>(), reinterpret_cast<uint16_t*>(state.data_ptr()),
-      slots.data_ptr<int32_t>(), visit_elems, visit * 3 * width + offset, width,
+      slots.data_ptr<int32_t>(), slot_elems, visit * 3 * width + offset, width,
       windows.numel() ? reinterpret_cast<uint16_t*>(windows.data_ptr()) : nullptr, steps, windows.numel() ? windows.size(1) : 1,
       mode == 1 ? reinterpret_cast<const uint16_t*>(hidden_in.data_ptr()) : nullptr, residual.data_ptr<float>(),
       mode == 2 ? reinterpret_cast<uint16_t*>(out.data_ptr()) : nullptr, mode, hidden);
@@ -1342,20 +1344,21 @@ std::vector<torch::Tensor> prep(torch::Tensor pq, torch::Tensor pk, torch::Tenso
   check(pages.scalar_type() == torch::kInt32 && pages.numel() == rows && positions.scalar_type() == torch::kInt64 && positions.numel() == rows,
         "pages int32 and positions int64, [R]");
   check(k_pool.size(-1) == kHeadDim && k_pool.element_size() == (fp8 ? 1 : 2) && v_pool.scalar_type() == k_pool.scalar_type() &&
-            heads * kHeadDim + heads <= 4096, "unexpected K/V geometry");
+            kv_heads <= heads, "unexpected K/V geometry");
   auto stream = c10::cuda::getCurrentCUDAStream();
   auto q = torch::empty({rows, heads, kHeadDim}, pq.options());
   auto rel = torch::empty({rows, heads, d_rel}, pq.options().dtype(torch::kFloat32));
   auto sink = torch::empty({rows, heads}, pq.options().dtype(torch::kFloat32));
-  const int64_t width = state.size(3), visit_elems = state.size(1) * 3 * width;
+  const int64_t width = state.size(3), slot_elems = state.size(1) * 3 * width;
   const size_t shared = (heads * kHeadDim + heads * d_rel + 2 * heads) * sizeof(float);
+  check(shared <= 48 * 1024, "prep's shared memory must fit 48 KB");
   const dim3 grid(rows, 3);
 #define LAUNCH_PREP(FP8)                                                                                                     \
   prep_kernel<FP8><<<grid, kPrepThreads, shared, stream>>>(                                                                  \
       reinterpret_cast<const uint16_t*>(pq.data_ptr()), pq.stride(0), reinterpret_cast<const uint16_t*>(pk.data_ptr()),      \
       reinterpret_cast<const uint16_t*>(pv.data_ptr()), pk.stride(0), q_scale.data_ptr<float>(), r_scale.data_ptr<float>(),  \
       k_taps.data_ptr<float>(), v_taps.data_ptr<float>(),                                                                    \
-      positions.data_ptr<int64_t>(), reinterpret_cast<uint16_t*>(state.data_ptr()), slots.data_ptr<int32_t>(), visit_elems,  \
+      positions.data_ptr<int64_t>(), reinterpret_cast<uint16_t*>(state.data_ptr()), slots.data_ptr<int32_t>(), slot_elems,   \
       visit * 3 * width, width, windows.numel() ? reinterpret_cast<uint16_t*>(windows.data_ptr()) : nullptr, steps,          \
       windows.numel() ? windows.size(1) : 1, reinterpret_cast<uint8_t*>(k_pool.data_ptr()),                                  \
       reinterpret_cast<uint8_t*>(v_pool.data_ptr()),                                                                         \
@@ -1371,7 +1374,7 @@ std::vector<torch::Tensor> prep(torch::Tensor pq, torch::Tensor pk, torch::Tenso
   return {q, rel, sink};
 }
 
-// x [R, H] BF16; router [E, H] BF16, bias [E] FP32; done int32 [>= ceil(R / 4)], zero between calls (the kernel resets
+// x [R, H] BF16; router [E, H] BF16, bias [E] FP32; done int32 [>= R], zero between calls (the kernel resets
 // it) -> (ids int64 [R, topk], weights FP32 [R, topk]).
 std::vector<torch::Tensor> route(torch::Tensor x, torch::Tensor router, torch::Tensor bias, torch::Tensor done, int64_t topk, double scale) {
   constexpr int kRows = 4;  // rows a block scores against the router rows it holds
@@ -1390,7 +1393,7 @@ std::vector<torch::Tensor> route(torch::Tensor x, torch::Tensor router, torch::T
     auto stream = c10::cuda::getCurrentCUDAStream();
     const auto* xp = reinterpret_cast<const uint16_t*>(x.data_ptr());
     const auto* rp = reinterpret_cast<const uint16_t*>(router.data_ptr());
-    if (rows <= 16) {  // a block a row: the last block of a group selects its rows one after another
+    if (rows <= 16) {  // a block a row: the last of a row's expert blocks selects it
       route_kernel<9, 1><<<dim3(rows, experts / 4), 128, 0, stream>>>(xp, rp, bias.data_ptr<float>(), scores.data_ptr<float>(), done.data_ptr<int>(),
                                                    ids.data_ptr<int64_t>(), weights.data_ptr<float>(), rows, experts, topk, scale);
     } else {

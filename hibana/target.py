@@ -413,7 +413,7 @@ def _inkling() -> Target:
         num_experts=c.NUM_EXPERTS, experts_per_token=c.EXPERTS_PER_TOKEN, moe_intermediate_size=c.MOE_INTERMEDIATE_SIZE,
         routed_scaling_factor=c.ROUTE_SCALE, stop_token_ids=c.STOP_TOKEN_IDS,
         kv_formats=("fp8", "sim-bf16"),  # sim-bf16: the checkpoint's own unquantized cache
-        slot_state_bytes=c.NUM_VISITS * (c.CONV_KERNEL - 1) * c.CONV_WIDTH * 2, chat_format="inkling",
+        slot_state_bytes=c.CONV_STATE_BYTES, chat_format="inkling",
         draft_pins=tuple((name, *pin) for name, pin in c.DRAFT_PINS.items()),
     )
 

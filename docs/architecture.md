@@ -76,8 +76,9 @@ benchmark_workloads.py  the fixed benchmark prompts (code, design, reasoning) th
 | Image input ([API](api.md#images)) | no | no | yes | yes |
 
 Inkling-2-Mini is outside the matrix: incoai's DFlash2 draft (all 7 verified) or its bundled DSpark drafter (a block of
-7, the first 3 verified), decode and verify graphs, exact arithmetic in `exact` and an FP8 trunk, expert sharing and
-gated soft acceptance in `fast` and `throughput`, the prefix cache with the SSD tier, text only, one Spark
+7, the first 3 verified), decode and verify graphs, exact arithmetic in `exact` and an FP8 trunk, expert sharing,
+relaxed greedy acceptance (top 2 within 0.5) and gated soft sampled acceptance in `fast` and `throughput`, the prefix
+cache with the SSD tier, text only, one Spark
 ([details](inkling.md)).
 
 ## Repository boundaries

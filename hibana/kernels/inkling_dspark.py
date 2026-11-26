@@ -138,7 +138,7 @@ def _vocab_step(LAT, F, FB, BASE, SB, PV, PI, V, R: tl.constexpr, CAP: tl.conste
 
 
 @triton.jit
-def _vocab_pick(PV, PI, TOK, ST, P, MP: tl.constexpr, PB: tl.constexpr, B):
+def _vocab_pick(PV, PI, TOK, ST, P, MP: tl.constexpr, PB: tl.constexpr):
     """The first index of the largest value over the programs' partial bests (programs in vocabulary order)."""
     row = tl.program_id(0)
     best = float("-inf")
@@ -174,7 +174,7 @@ def vocab_step(latent: torch.Tensor, fold_weight: torch.Tensor, fold_bias: torch
     pv, pi = vocab_scratch(v, latent.device) if scratch is None else scratch
     _vocab_step[(programs,)](latent, fold_weight, fold_bias, base, base.stride(0), pv, pi, v, R=r, CAP=softcap, BN=_STEP_BN,
                              GROUPS=_STEP_GROUPS, MP=mp, B=b, num_warps=4, num_stages=3, enable_fp_fusion=False)
-    _vocab_pick[(b,)](pv, pi, out, out.stride(0), programs, MP=mp, PB=256, B=b, num_warps=4)
+    _vocab_pick[(b,)](pv, pi, out, out.stride(0), programs, MP=mp, PB=256, num_warps=4)
 
 
 def vocab_scratch(v: int, device) -> tuple[torch.Tensor, torch.Tensor]:
@@ -240,8 +240,8 @@ def _mix_norm(T0, T1, T2, T3, S0, S1, S2, S3, ROWS, ALPHA, WEIGHT, OUT, T, EPS, 
 
 def mix_norm(taps, alpha: torch.Tensor, weight: torch.Tensor, eps: float, rows: torch.Tensor | None = None) -> torch.Tensor:
     """taps: four BF16 [N, 2304] (rows unit-stride), alpha FP32 [mixes, 4], weight FP32 [mixes, 2304] -> BF16
-    [mixes, T, 2304]: the RMS norm of each mix of the taps' rows (`rows`, int64 [T], or all N), as the drafter's
-    `mix` (PyTorch's mul and sum over the taps, then `kernels.rms`) gives it."""
+    [mixes, T, 2304]: the RMS norm of each mix of the taps' rows (`rows`, int64 [T], or all N), with the bits of
+    PyTorch's mul and sum over the taps, then `kernels.rms`."""
     n, h = taps[0].shape
     t = n if rows is None else rows.shape[0]
     mixes = alpha.shape[0]

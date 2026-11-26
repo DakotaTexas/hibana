@@ -207,7 +207,7 @@ class Attention:
         parts = [stacked("wq_du.weight", "wr_du.weight", "gate_attn.weight", "attn_sink_proj.weight"),
                  stacked("wk_dv.weight", *(() if local else ("k_sconv.weight_proj",))),
                  stacked("wv_dv.weight", *(() if local else ("v_sconv.weight_proj",)))]
-        self.qkv, self.qkv_scales = None, None
+        self.qkv_scales = None
         if precision == "bf16":  # one matrix, its three projections views of it: decode multiplies them in one launch
             self.qkv = torch.cat(parts)
             parts = list(self.qkv.split([part.shape[0] for part in parts]))
@@ -241,7 +241,7 @@ class Attention:
         at position p sees its sequence's first p + 1 keys (`layout.row_len`)."""
         sets, t = x.shape[:2]
         nq, nk = self.query.out_features, self.wk.out_features
-        if self.qkv is not None and t <= kernels.GEMV_ROWS:
+        if t <= kernels.GEMV_ROWS:
             p = kernels.gemv(x if sets == 3 else x[0], self.qkv, nq, nq + nk, self.qkv_scales)
             pq, pk, pv = p[:, :nq], p[:, nq:nq + nk], p[:, nq + nk:]
         else:

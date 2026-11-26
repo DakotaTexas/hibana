@@ -211,7 +211,7 @@ class Executor:
         from hibana.cache.ledger import check_load_headroom
         fixed, per_page = budget(SpecConfig(proposer, k, state_strategy, draft_precision, draft_dir), self.max_batch,
                                  cache_slots=self.state_pool.num_slots, target=self.target)
-        if proposer == "dspark":  # the model registered its context rows with the pool (`register_pages`): allocated already
+        if proposer == "dspark":  # the KV pool already holds its context rows (`register_pages` at load)
             per_page = 0
         after = after_plan_bytes(self.max_batch)
         check_load_headroom(fixed + per_page * self.kv_pool.num_pages + after["graphs"] + after["first_use"] + after["activations"])

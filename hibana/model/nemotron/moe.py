@@ -279,7 +279,7 @@ def route_budget(fused: torch.Tensor, bias: torch.Tensor, k: int, latent: int, k
     `repeat` no expert (id E). `fallback` (< keep): when the guaranteed experts' union exceeds the cap, each real row is
     guaranteed only its top `fallback` and the cap fills by routing weight (rows keep whichever of their top k the set
     holds). `scale` multiplies the weights, `id_dtype` types the ids (Inkling: latent 0, its route scale, int64 ids).
-    Five launches, no atomics, no host sync."""
+    Four launches, no atomics, no host sync."""
     from hibana.kernels.flashnext_fused import _budget_score_kernel
     r = fused.shape[0]
     e = fused.shape[1] - latent

@@ -15,9 +15,7 @@ ACCEPT_SOFT_GATE = (1, 0.0)
 def set_accept_default(top_k: int, margin: float, soft: float = 0.0, soft_gate: tuple[int, float] = (1, 0.0)) -> None:
     global ACCEPT_DEFAULT, ACCEPT_SOFT_DEFAULT, ACCEPT_SOFT_GATE
     SamplingParams(accept_top_k=top_k, accept_margin=margin, accept_soft=soft).validate()
-    if (type(soft_gate[0]) is not int or soft_gate[0] < 1 or not math.isfinite(soft_gate[1]) or soft_gate[1] < 0):
-        raise InvalidRequest(SOFT_GATE_FORM)
-    ACCEPT_DEFAULT, ACCEPT_SOFT_DEFAULT, ACCEPT_SOFT_GATE = (top_k, margin), soft, soft_gate
+    ACCEPT_DEFAULT, ACCEPT_SOFT_DEFAULT, ACCEPT_SOFT_GATE = (top_k, margin), soft, _checked_gate(soft_gate)
 
 
 def parse_accept_default(text: str | None) -> tuple[int, float]:
@@ -34,18 +32,24 @@ def parse_accept_default(text: str | None) -> tuple[int, float]:
 SOFT_GATE_FORM = "the accept_soft gate must be K:M (top K >= 1 within M >= 0 nats of the top token) or off"
 
 
+def _checked_gate(gate: tuple[int, float]) -> tuple[int, float]:
+    try:  # the same range as a request's accept_top_k and accept_margin
+        SamplingParams(accept_top_k=gate[0], accept_margin=gate[1]).validate()
+    except InvalidRequest as exc:
+        raise InvalidRequest(SOFT_GATE_FORM) from exc
+    return gate
+
+
 def parse_soft_gate(text: str | None) -> tuple[int, float]:
     """'off', '' or None -> (1, 0.0): no gate; 'K:M' -> a draft gets e^s only within the target's top K and M nats."""
-    if text is None or text.strip().lower() in ("", "off", "1:0", "1:0.0"):
+    if text is None or text.strip().lower() in ("", "off"):
         return (1, 0.0)
     try:
         k, m = text.split(":")
         gate = (int(k), float(m))
     except ValueError as exc:
         raise ValueError(SOFT_GATE_FORM) from exc
-    if gate[0] < 1 or not math.isfinite(gate[1]) or gate[1] < 0:
-        raise ValueError(SOFT_GATE_FORM)
-    return gate
+    return _checked_gate(gate)
 
 
 def _sampling_from(body: dict, max_default: int = 512) -> SamplingParams:
@@ -80,7 +84,7 @@ def _sampling_from(body: dict, max_default: int = 512) -> SamplingParams:
     given = [k in body or k in sp for k in ("accept_top_k", "accept_margin")]
     if params.greedy and not any(given) and ACCEPT_DEFAULT != (1, 0.0):
         params.accept_top_k, params.accept_margin = ACCEPT_DEFAULT
-    elif not params.greedy and not all(given):  # a sampled request's gate is both its fields or the server's (none: 1, 0)
+    elif not params.greedy and not all(given):  # a sampled request's gate is both its fields or the server's
         params.accept_top_k, params.accept_margin = ACCEPT_SOFT_GATE
     params.validate()
     return params

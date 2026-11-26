@@ -112,26 +112,28 @@ def profile_defaults(profile: str, target: str, flashnext_experts: str = "w3", t
         if profile not in PROFILE_NAMES:
             raise ValueError(f"unknown serving profile {profile!r} (choose from {', '.join(PROFILE_NAMES)})")
         # DFlash2 drafts by default (below); with HIBANA_PROPOSER=dspark, the bundled DSpark. At temperature 1.0 on one
-        # Spark (18 h2h prompts, 1 / 4 / 8 / 16 requests, exact) DFlash2 decodes 69.2 / 126.7 / 191.8 / 303.4 tok/s against
-        # DSpark's 62.2 / 107.5 / 156.4 / 246.2 and vLLM's 43.2 / 89.0 / 142.9 / 242.5 (its DSpark, 7 drafts; vLLM has no
-        # DFlash2 for Inkling): DFlash2 drafts its block in one forward, so verifying all 7 costs only verify rows, where
-        # each DSpark draft is one more drafter step (DSpark at 16 requests: 3 drafts 318.7 tok/s, 7 drafts 294.8).
-        # Greedy requests are verified exactly in every profile, sampled ones in `exact` (fast and throughput: s = 0.25
-        # gated 3:2.0, below). DSpark: a round verifies the first 3 of the 7: a verified row costs
+        # Spark (18 h2h prompts, 1 / 4 / 8 / 16 requests, FP8 trunk, no sharing, exact acceptance, drafts at every
+        # batch) DFlash2 decodes 69.2 / 126.7 / 191.8 / 303.4 tok/s against DSpark's 62.2 / 107.5 / 156.4 / 246.2 and
+        # vLLM's 43.2 / 89.0 / 142.9 / 242.5 (its DSpark, 7 drafts; vLLM has no DFlash2 for Inkling): DFlash2 drafts its
+        # block in one forward, so verifying all 7 costs only verify rows, where each DSpark draft is one more drafter
+        # step (DSpark at 16 requests, keep 4 at 12:48 and the gated rule at s = 0.5: 3 drafts 318.7 tok/s, 7 294.8).
+        # `exact` verifies every request exactly; fast and throughput relax greedy (2:0.5) and sampled (s = 0.25 gated
+        # 3:2.0) acceptance, below. DSpark: a round verifies the first 3 of the 7: a verified row costs
         # its own experts, and drafts past the third are rarely reached; depth by acceptance up to 7
-        # (HIBANA_SPEC_STEP_COST) was within noise of it. Past four requests `exact` decodes plainly. Served tok/s over the
-        # 18 h2h prompts (thinking off, to 1,024 tokens), one request greedy / T 0.7 (median), then 2 / 4 closed-loop
-        # streams in all: BF16 trunk with the drafter 56.6 / 51.7, 72.7 / 99.9, without 39.6 / 38.9, 61.0 / 85.7; FP8
-        # trunk with the drafter 68.5 / 65.7, 84.5 / 109.9. The SSD tier stores each visit's K/V and convolution
-        # windows and DSpark's context rows with a prefix; a resume from it matches one from memory bit for bit.
-        p = {"HIBANA_SPEC": "7", "HIBANA_SPEC_DEPTHS": "1:3,2:3,4:3,8:0,16:0", "HIBANA_W3_DECODE": "0", "HIBANA_ACCEPT_DEFAULT": "off",
+        # (HIBANA_SPEC_STEP_COST) was within 3% at 1 and 4 requests and 13% / 7% slower at 8 / 16 (the same stack at
+        # T 1.0). Past four requests `exact` decodes plainly. Served tok/s with DSpark over the 18 h2h prompts (thinking
+        # off, to 1,024 tokens), one request greedy / T 0.7 (median), then 2 / 4 closed-loop streams in all: BF16 trunk
+        # with the drafter 56.6 / 51.7, 72.7 / 99.9, without 39.6 / 38.9, 61.0 / 85.7; FP8 trunk without sharing, with
+        # the drafter 68.5 / 65.7, 84.5 / 109.9. The SSD tier stores each visit's K/V and convolution windows and the
+        # drafter's context with a prefix; a resume from it matches one from memory bit for bit.
+        p = {"HIBANA_SPEC_DEPTHS": "1:3,2:3,4:3,8:0,16:0", "HIBANA_W3_DECODE": "0", "HIBANA_ACCEPT_DEFAULT": "off",
              "HIBANA_ACCEPT_SOFT": "0", "HIBANA_DEVICE_ACCEPT": "0", "HIBANA_MAX_BATCH": "4", "HIBANA_SSD": "1",
              "HIBANA_INKLING_TRUNK": "bf16"}
         if proposer == "dflash2":
             # incoai's DFlash2 draft (docs/inkling.md#dflash2): a round verifies its whole block of 7 at one to four
             # requests. Same h2h measurement, `exact`: 58.6 / 60.6, 82.6 / 111.8 against DSpark's 54.8 / 53.8, 72.3 /
             # 100.6; verifying 5 or 4 was slower (55.5 / 51.1, 80.4 / 109.4 and 55.6 / 58.6, 81.9 / 107.3)
-            p.update(HIBANA_SPEC="7", HIBANA_SPEC_DEPTHS="1:7,2:7,4:7,8:0,16:0", HIBANA_DRAFT="pinned")
+            p.update(HIBANA_SPEC_DEPTHS="1:7,2:7,4:7,8:0,16:0", HIBANA_DRAFT="pinned")
         if profile == "exact":
             return p
         # fast, throughput: the attention projections and the vocabulary head in FP8 (the checkpoint's are BF16): a decode
@@ -146,8 +148,9 @@ def profile_defaults(profile: str, target: str, flashnext_experts: str = "w3", t
         # +22 / +25 / +16 / +17%.
         p.update(HIBANA_MOE_KEEP="4", HIBANA_MOE_BUDGET="12:48")
         # sampled requests: soft acceptance s = 0.25. DSpark's drafts are single tokens, so the rule accepts a draft
-        # with min(1, p e^s): GPQA (sampled, thinking on, 16 requests) 68.7% at s = 0.25 and at exact, 61.6% at
-        # s = 0.5 (longer answers, more at the cap). T 0.7 h2h: one request +11%, 2 / 4 streams +4%.
+        # with min(1, p e^s). DSpark, ungated: GPQA (sampled, thinking on, 16 requests) 68.7% at s = 0.25 and at exact,
+        # 61.6% at s = 0.5 (longer answers, more at the cap); T 0.7 h2h with keep 6 at 16:64 sharing: one request
+        # +11%, 2 / 4 streams +4%.
         p["HIBANA_ACCEPT_SOFT"] = "0.25"
         # greedy requests: a draft within the target's top 2 and 0.5 logits of its top is accepted. Greedy h2h with
         # throughput's settings, 1 / 4 / 8 / 16 requests: +12 / +7 / +9 / +9% against +14 / +12 / +8 / +14% at 2:1.0,
@@ -162,8 +165,8 @@ def profile_defaults(profile: str, target: str, flashnext_experts: str = "w3", t
         # (DFlash2) points on LiveCodeBench.
         p["HIBANA_ACCEPT_SOFT_GATE"] = "3:2.0"
         if profile == "throughput":
-            # both drafters draft at every batch: at 8 / 16 streams (keep 6, 16:64) DSpark gave 173.3 / 243.3 tok/s and
-            # DFlash2 176.9 / 304.8 against 125.8 / 196.0 for plain decode
+            # both drafters draft at every batch: at 8 / 16 streams (FP8 trunk, exact acceptance, keep 6 at 16:64)
+            # DSpark gave 173.3 / 243.3 tok/s and DFlash2 178.8 / 303.3 against 125.8 / 196.0 for plain decode
             d = "7" if proposer == "dflash2" else "3"
             p.update(HIBANA_MAX_BATCH="16", HIBANA_SPEC_DEPTHS=",".join(f"{n}:{d}" for n in (1, 2, 4, 8, 16)))
         return p
@@ -449,14 +452,16 @@ class Settings:
         return args
 
 
-def _gate_text(text: str) -> bool:
+def soft_gate(text: str) -> tuple[int, float] | None:
+    """HIBANA_ACCEPT_SOFT_GATE as (K, M): (1, 0.0) when off, None when malformed."""
     if text.strip().lower() in ("", "off"):
-        return True
+        return (1, 0.0)
     try:
         k, m = text.split(":")
-        return int(k) >= 1 and math.isfinite(float(m)) and float(m) >= 0
+        gate = (int(k), float(m))
     except ValueError:
-        return False
+        return None
+    return gate if gate[0] >= 1 and math.isfinite(gate[1]) and gate[1] >= 0 else None
 
 
 def _finite_nonnegative(text: str) -> bool:
@@ -519,7 +524,8 @@ def resolve(target: str | None = None, profile: str | None = None, overrides: di
     for key in ("HIBANA_W3_DECODE", "HIBANA_DEVICE_ACCEPT", "HIBANA_MTP_SAMPLE"):
         _check(values.get(key, "0") in ("0", "1"), f"{key} must be 0 or 1")
     _check(_finite_nonnegative(values.get("HIBANA_ACCEPT_SOFT", "0")), "HIBANA_ACCEPT_SOFT must be a finite number >= 0 (0: exact)")
-    _check(_gate_text(values.get("HIBANA_ACCEPT_SOFT_GATE", "off")), "HIBANA_ACCEPT_SOFT_GATE must be K:M (top K >= 1 within M >= 0 nats) or off")
+    _check(soft_gate(values.get("HIBANA_ACCEPT_SOFT_GATE", "off")) is not None,
+           "HIBANA_ACCEPT_SOFT_GATE must be K:M (top K >= 1 within M >= 0 nats) or off")
     batch = values.get("HIBANA_MAX_BATCH", "4")
     _check(batch.isdigit() and 1 <= int(batch) <= 128, "HIBANA_MAX_BATCH must be in [1, 128]")
     depths = values.get("HIBANA_SPEC_DEPTHS", "")
@@ -562,8 +568,9 @@ def resolve(target: str | None = None, profile: str | None = None, overrides: di
         _check(kv_format in ("fp8", "sim-bf16"), "Bolt supports FP8 KV or sim-bf16 for parity")
     if name == "inkling":
         _check(spec == 0 or (proposer == "dspark" and spec == 7) or (proposer == "dflash2" and 1 <= spec <= 15),
-               "Inkling drafts with its bundled DSpark, a block of 7 (HIBANA_SPEC=7; HIBANA_SPEC_DEPTHS says how many a round "
-               "verifies), with DFlash2 (HIBANA_PROPOSER=dflash2, 1..15 drafts), or HIBANA_SPEC=0")
+               "Inkling drafts with DFlash2 (the default, HIBANA_SPEC 1..15), with its bundled DSpark "
+               "(HIBANA_PROPOSER=dspark, HIBANA_SPEC=7; HIBANA_SPEC_DEPTHS says how many a round verifies), "
+               "or HIBANA_SPEC=0")
         _check(values.get("HIBANA_VERIFY_STATE", "snapshots") == "snapshots", "Inkling verifies with HIBANA_VERIFY_STATE=snapshots (it has no recurrent state to reconstruct)")
         _check(kv_format in ("fp8", "sim-bf16"), "Inkling supports FP8 KV, or sim-bf16 for parity")
         _check(values.get("HIBANA_INKLING_TRUNK", "bf16") in ("bf16", "fp8"), "HIBANA_INKLING_TRUNK must be bf16 or fp8")

@@ -148,17 +148,19 @@ def test_verify_candidates_soft_law(draft):
     s = 0.5
     rows = torch.tensor([[1.0, 4, 1.0, 1.0, 2.0, math.exp(-s), 1.0, 0]], device=DEV).expand(n, 8).contiguous()
     c_on = torch.tensor([math.exp(s), math.exp(s), 1.0, 1.0], device=DEV)
-    for y in ((0, 2) if draft != "dflash2" else (None,)):
-        if y is None:
-            drafts = torch.multinomial(q, n, replacement=True).view(n, 1)
-            qq, support, point = q.expand(n, 1, 4).contiguous(), torch.arange(4, device=DEV).expand(n, 1, 4).contiguous(), q
-        else:
-            drafts, qq, support = torch.full((n, 1), y, device=DEV), None, None
-            point = torch.nn.functional.one_hot(torch.tensor(y, device=DEV), 4).float()
-        a, c, flags, fit = verify_candidates(values, index, drafts, rows, rng, qq, support)
-        got = torch.bincount(torch.where(a > 0, drafts[:, 0], c), minlength=4).float() / n
-        acc = torch.minimum(point, c_on * p)
-        left = (p - point).clamp(min=0)
-        law = acc + (1 - acc.sum()).clamp(min=0) * left / left.sum()
-        assert (got - law).abs().max() < 0.004, (draft, y, got, law)
-        assert (got[2:] <= p[2:] + 0.004).all()  # outside the gate: never more often than the target
+    y = {"mtp-top": 0, "mtp-tail": 2, "dflash2": None}[draft]  # mtp-top inside G, mtp-tail outside it
+    if y is None:  # q above p on token 2, outside G: the boost there must be gated off (0.07, not 0.115)
+        q_g = torch.tensor([0.80, 0.06, 0.12, 0.02], device=DEV)
+        drafts = torch.multinomial(q_g, n, replacement=True).view(n, 1)
+        qq, point = q_g.expand(n, 1, 4).contiguous(), q_g
+        support = torch.arange(4, device=DEV).expand(n, 1, 4).contiguous()
+    else:
+        drafts, qq, support = torch.full((n, 1), y, device=DEV), None, None
+        point = torch.nn.functional.one_hot(torch.tensor(y, device=DEV), 4).float()
+    a, c, flags, fit = verify_candidates(values, index, drafts, rows, rng, qq, support)
+    got = torch.bincount(torch.where(a > 0, drafts[:, 0], c), minlength=4).float() / n
+    acc = torch.minimum(point, c_on * p)
+    left = (p - point).clamp(min=0)
+    law = acc + (1 - acc.sum()).clamp(min=0) * left / left.sum()
+    assert (got - law).abs().max() < 0.004, (draft, got, law)
+    assert (got[2:] <= p[2:] + 0.004).all()  # outside the gate: never more often than the target

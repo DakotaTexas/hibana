@@ -8,8 +8,8 @@
 The experts run on the checkpoint's packed tensors (NVFP4 in layers 0-19, MXFP8 in 20-23), their inputs quantized as
 hf_quant_config.json requires. Prefill and wide decode or verification calls sort the (token, expert) pairs by
 expert; calls of up to `PAIR_ROWS` rows multiply each pair where it is (`kernels/inkling_prefill.py`).
-HIBANA_MOE_KEEP / HIBANA_MOE_BUDGET (off by default) share experts across a decode or verification call through
-Nemotron's `route_budget`, which ranks the same way.
+HIBANA_MOE_KEEP / HIBANA_MOE_BUDGET (the fast and throughput profiles: keep 4, 12:48; off in exact) share experts
+across a decode or verification call through Nemotron's `route_budget`, which ranks the same way.
 """
 
 from __future__ import annotations

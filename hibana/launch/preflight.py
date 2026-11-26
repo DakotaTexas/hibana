@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 from hibana.launch import guard
-from hibana.launch.settings import TARGET_SETTINGS, Settings, model_config
+from hibana.launch.settings import TARGET_SETTINGS, Settings, model_config, soft_gate
 
 HEADROOM = 10 * 2**30  # left free after a download: logs, JIT caches, stored prefixes
 LOAD_PEAK_KIB = 24 * 2**20  # the streaming load's measured MemAvailable drop, with margin (qwen38_config.WEIGHT_LOAD_PEAK_BYTES)
@@ -173,7 +173,8 @@ def summary(s: Settings, host: dict[str, str], w3: Path | None, tp: int = 1) -> 
              f"  speculation: {s.proposer}, {s.spec} drafts, draft {draft}",
              f"  acceptance: greedy {s.get('HIBANA_ACCEPT_DEFAULT')}, sampled "
              + (f"s={soft}" if float(soft) > 0 else "exact")
-             + (f" inside {s.get('HIBANA_ACCEPT_SOFT_GATE')}" if float(soft) > 0 and s.get("HIBANA_ACCEPT_SOFT_GATE", "off").strip().lower() not in ("", "off", "1:0", "1:0.0") else ""),
+             + (f" inside {s.get('HIBANA_ACCEPT_SOFT_GATE')}" if float(soft) > 0
+                and soft_gate(s.get("HIBANA_ACCEPT_SOFT_GATE", "off")) not in (None, (1, 0.0)) else ""),
              f"  3-bit copies: {on(s.engine_env(w3).get('HIBANA_W3_DECODE'))}{f' ({w3})' if w3 else ''}; "
              f"device-resident acceptance: {on(s.get('HIBANA_DEVICE_ACCEPT'))}",
              f"  context {s.max_context} tokens, up to {s.get('HIBANA_MAX_BATCH')} requests"

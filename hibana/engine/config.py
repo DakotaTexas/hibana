@@ -108,7 +108,7 @@ class EngineConfig:
     vision: bool = False                      # HIBANA_VISION: load the checkpoint's vision encoder for image input (Nemotron Super and Bolt; about 1.7 GiB)
     # --- speculation
     spec: str | None = None                   # HIBANA_SPEC as given ("auto"/unset: the proposer's default depth)
-    proposer: str | None = None               # HIBANA_PROPOSER: mtp | dflash2 | dspark (unset: the target's own drafter)
+    proposer: str | None = None               # HIBANA_PROPOSER: mtp | dflash2 | dspark (serve: the target's default)
     spec_depths: str | None = None            # HIBANA_SPEC_DEPTHS: verify depth per batch bucket, "8:1,16:0" (0: plain decode; unset: HIBANA_SPEC everywhere)
     spec_step_cost: float = 0.0               # HIBANA_SPEC_STEP_COST: a drafted token's cost against a depth-1 round, for adaptive depth (engine/depth.py; 0: fixed)
     spec_policy: str = "fixed"                # HIBANA_SPEC_POLICY: fixed | budget (engine/depth.RowBudget: verified drafts from scores and measured costs)
@@ -121,7 +121,7 @@ class EngineConfig:
     mtp_sample: bool = False                  # HIBANA_MTP_SAMPLE: sampled requests draft from the MTP head's law on its rescored candidates instead of its argmax, verified against that law
     accept_default: str = "off"               # HIBANA_ACCEPT_DEFAULT: K:M for greedy requests that set neither field (off: exact)
     accept_soft: float = 0.0                  # HIBANA_ACCEPT_SOFT: accept_soft s for sampled requests that do not set it (0: exact)
-    accept_soft_gate: str = "off"             # HIBANA_ACCEPT_SOFT_GATE: K:M gate on accept_soft for sampled requests that set neither field (off: every draft)
+    accept_soft_gate: str = "off"             # HIBANA_ACCEPT_SOFT_GATE: K:M gate on sampled accept_soft
     qsa_sparse_graphs: bool = True            # HIBANA_QSA_SPARSE_GRAPHS=0: rows past the indexer budget run eagerly
     qsa_prefill_backend: str = "original"    # HIBANA_QSA_PREFILL_BACKEND: original, auto, optimized (SM121 TP1/TP2, <=32K)
     ple_resident: str = "auto"                 # HIBANA_PLE_RESIDENT: Flash-Next's PLE table in device memory, each tensor-parallel rank its share of the heads; auto: on two Sparks, 0: off

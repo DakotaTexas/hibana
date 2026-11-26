@@ -108,10 +108,10 @@ def _nucleus(probs: torch.Tensor, top_p: float, top_k: int) -> torch.Tensor:
 
 def corrected_distribution(p, q):
     """Law at a rejection: max(p-q, 0), normalized. No epsilon mass added. A residual with no mass only comes from
-    rounding (p and q point masses on one token, p_y a few ulp under q_y): the correction is then drawn from p."""
+    rounding (e.g. p and q point masses on one token, p_y a few ulp under q_y): the correction is then drawn from p."""
     residual = (p - q).clamp_min(0)
     mass = residual.sum(-1, keepdim=True)
-    return torch.where(mass > 0, residual / mass.clamp_min(torch.finfo(residual.dtype).tiny), p)
+    return torch.where(mass > 0, residual / mass, p)
 
 
 def verify_row(tokens, p, q, support, generator):
@@ -171,8 +171,8 @@ def verify_rows(tokens, p, q, support, generator, soft_scale: float = 1.0, gate=
     token is also accepted when u * e^-s * q_j[y_j] < p_j[y_j]; with `gate`
     (top_k, margin; SamplingParams.soft_gate) only a draft `soft_gated` passes
     gets that test. The correction at the first position failing both tests is
-    the residual as before. The third result marks accepted positions that only
-    the relaxed rule accepted ([k] bool)."""
+    the residual max(p-q, 0). The third result marks accepted positions that
+    only the relaxed rule accepted ([k] bool)."""
     k = tokens.shape[0]
     idx = torch.arange(k, device=p.device)
     if q is None:  # deterministic draft: acceptance p[y], residual p without y
@@ -195,7 +195,6 @@ def verify_rows(tokens, p, q, support, generator, soft_scale: float = 1.0, gate=
     prefix = torch.cumprod(ok.to(torch.int64), dim=0)
     accepted = prefix.sum()
     residual = corrected_distribution(p[:k], q_rows)
-    residual = torch.where(residual.isfinite(), residual, torch.zeros_like(residual))
     laws = torch.cat([residual, p[k:k + 1]], dim=0)  # law at rejection position a, or the bonus law
     law = laws.index_select(0, accepted.reshape(1))
     correction = torch.multinomial(law, 1, generator=generator).reshape(())
@@ -295,9 +294,7 @@ def verify_batch(tokens, logits, params, generators, q=None, support=None, rng=N
         if q is not None:
             boosted = boosted & (q_y > 0)  # a draft its law never gives: rejected, as by the exact test
         if any(g is not None for g in gates):  # gated rows: only drafts inside the gate get e^s (top 0: no gate)
-            rank = (law[:, :k] > p_y.unsqueeze(-1)).sum(-1)
-            gap = law[:, :k].amax(-1).log() - p_y.log()
-            inside = (p_y > 0) & (rank < rule[:, 2:3]) & (gap <= rule[:, 3:4])
+            inside = soft_gated(p_y, law[:, :k], (rule[:, 2:3], rule[:, 3:4]))
             boosted = boosted & ((rule[:, 2:3] <= 0) | inside)
         ok = exact | ((rule[:, :1] > 0) & boosted)  # rows not relaxed: exact
     prefix = torch.cumprod(ok.to(torch.int64), dim=1)
@@ -367,7 +364,8 @@ def sample_lattice(candidates, scores, params, generators):
 
 
 def gate_slots(p):
-    """A sampled row's row_params[4:8] for kernels/sampled_verify.py: (gate top_k or 0, e^-accept_soft, gate margin, 0)."""
+    """A sampled row's row_params[4:8] for kernels/sampled_verify.py: (gate top_k or 0, e^-accept_soft, gate margin,
+    0)."""
     gate = p.soft_gate if p.relaxed else None
     return (float(gate[0]) if gate else 0.0, p.soft_scale, gate[1] if gate else 0.0, 0.0)
 

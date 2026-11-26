@@ -80,7 +80,7 @@ class DSparkProposer:
         for name, value in (("tokens", inputs.tokens), ("positions", inputs.positions), ("pages", pages[:, :block]), ("slots", inputs.slots)):
             st[name].copy_(value[fill] if size > batch else value)
         # The page lists go request by request into the graph's buffer (device copies) and their offsets from pinned
-        # memory: a pageable upload here waited for the GPU to drain the commit before the draft could be queued.
+        # memory: a pageable upload would wait for the GPU to drain the commit before the draft could be queued.
         offsets = torch.tensor([0, *(lengths[i] for i in fill)], dtype=torch.int32, pin_memory=device.type == "cuda").cumsum_(0)
         st["indptr"].copy_(offsets, non_blocking=True)
         at = 0
@@ -118,7 +118,7 @@ class DSparkProposer:
 
     def capture_graphs(self, log=None, depths=None) -> None:
         """A graph per (verify depth, batch bucket), the verify graphs' pairs: the block's layers and the head's draws
-        (run eagerly, a round's draft took 9.2 ms of which the operators' launches about 3)."""
+        (run eagerly, their many small operators each pay a launch)."""
         device, draft = self.context.device, self.draft
         block, capacity = draft.block, draft.cos.shape[0]  # a request's pages: its context and the block
         for depth, buckets in sorted((depths or {}).items()):

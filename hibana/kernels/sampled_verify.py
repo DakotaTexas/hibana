@@ -5,9 +5,10 @@ After one top-k over the vocabulary (the candidates, sorted), one program per re
 at every verified position (temperature, top-k with ties, the nucleus in candidate order), accepts drafted token j
 with probability min(1, p_j[y_j] / q_j[y_j]) (q a point mass for MTP's drafts, a law on its support for DFlash2's;
 relaxed rows, accept_soft s > 0, also accept y_j when u * e^-s * q_j[y_j] < p_j[y_j]; a row with a soft gate, only
-when its law ranks y_j within the gate's top k and log max(law) - log p_j[y_j] <= its margin), and draws the correction from
-max(p_a - q_a, 0) at the first rejection a, or the bonus from p_k, by inverse CDF. Uniforms are Philox draws at the
-request's (seed, offset + j) (engine/sampling_rng.py). A row whose top-k ties run past its candidates is flagged unfit.
+when its law ranks y_j within the gate's top k and log max(law) - log p_j[y_j] <= its margin), and draws the
+correction from max(p_a - q_a, 0) at the first rejection a, or the bonus from p_k, by inverse CDF. Uniforms are
+Philox draws at the request's (seed, offset + j) (engine/sampling_rng.py). A row whose top-k ties run past its
+candidates is flagged unfit.
 """
 import torch
 import triton
@@ -72,7 +73,7 @@ def _verify(values, index, drafts, q, support, row_params, rng, accepted_out, co
             tl.store(flags_out + row * K + j, tl.where((alive > 0) & ok & (exact == 0), 1, 0).to(tl.int64))
             reject = (alive > 0) & (ok == 0)
             residual = tl.maximum(law - q_at, 0.0)
-            residual = tl.where(tl.sum(residual, 0) > 0, residual, law)  # no residual mass (a rounding rejection): the target's law
+            residual = tl.where(tl.sum(residual, 0) > 0, residual, law)  # no mass (rounding): the target's law
             cdf = tl.cumsum(residual, 0)
             pick = tl.minimum(tl.sum(tl.where(in_c & (cdf <= u_last * tl.sum(residual, 0)), 1, 0), 0), C - 1)
             token = tl.sum(tl.where(c == pick, tokens, 0), 0)
@@ -92,9 +93,10 @@ def _verify(values, index, drafts, q, support, row_params, rng, accepted_out, co
 def verify_candidates(values, index, drafts, row_params, rng, q=None, support=None):
     """values [B, K + 1, C] (the vocabulary top-k of the verify logits, descending), index [B, K + 1, C] their token
     ids, drafts int64 [B, K], row_params float32 [B, 8] (temperature, top_k, top_p, 1 for a relaxed row else 0,
-    soft gate top k or 0, e^-accept_soft, soft gate margin, unused), rng int64 [B, 2] (seed, offset), and the drafts' law q [B, K, W] on support [B, K, W] or None
-    (point masses). Every row must have 0 < top_k <= C. Returns (accepted [B], correction [B], relaxed-only flags [B, K],
-    fit [B] int32: 0 where ties of the k-th value run past the candidates)."""
+    soft gate top k or 0, e^-accept_soft, soft gate margin, unused), rng int64 [B, 2] (seed, offset), and the drafts'
+    law q [B, K, W] on support [B, K, W] or None (point masses). Every row must have 0 < top_k <= C. Returns
+    (accepted [B], correction [B], relaxed-only flags [B, K], fit [B] int32: 0 where ties of the k-th value run past
+    the candidates)."""
     b, s, c = values.shape
     k = s - 1
     dev = values.device

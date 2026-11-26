@@ -20,9 +20,9 @@ drafter `incoai/Qwen3.8-27B-DFlash2` at `dedf8df`), `flashnext` (`RadixArk/Qwen3
 `7b71922`, its own MTP head, or the DFlash2 drafter `incoai/Qwen3.8-Flash-Next-DFlash2` at `a22a174` on one Spark),
 and on one Spark `nemotron` ([Nemotron 3.5 Super](nemotron.md)), `bolt` ([Nemotron 3.5 Bolt](bolt.md)) and
 `inkling` ([Inkling 2 Mini](inkling.md)).
-`hibana serve` downloads whatever the cache lacks (about 26 GB for the 27B, 135 GB for
-Flash-Next, 75 GB for Nemotron Super, 25 GB for Bolt, and in `fast` and `throughput` the calibrated 3-bit checkpoint:
-10, 51 and 49 GB, none for Bolt) after checking free disk; serving itself runs offline.
+`hibana serve` downloads whatever the cache lacks (about 26 GB for the 27B, 135 GB for Flash-Next, 75 GB for Nemotron
+Super, 25 GB for Bolt, about 20 GB for Inkling, and in `fast` and `throughput` the calibrated 3-bit checkpoint: 10, 51
+and 49 GB, none for Bolt or Inkling) after checking free disk; serving itself runs offline.
 
 ## Install and serve
 
@@ -206,7 +206,7 @@ the config file wins. `/get_server_info` reports the profile under `config`.
 | Relaxed acceptance, sampled requests (`HIBANA_ACCEPT_SOFT`, `accept_soft` in the [API](api.md)) | 0 (exact) | Flash-Next and Nemotron s = 0.5; Inkling 0.25; the 27B and Bolt 0 (exact) | as fast |
 | Gate on sampled relaxed acceptance (`HIBANA_ACCEPT_SOFT_GATE`, K:M: e^s only for drafts in the target's top K within M nats of its top token) | off | Inkling 3:2.0; else off (every draft) | as fast |
 | Sampled MTP drafts (`HIBANA_MTP_SAMPLE`, [below](#sampled-mtp-drafts)) | off | on where MTP drafts | as fast |
-| Calibrated 3-bit decode copies (`HIBANA_W3_DECODE`; on Flash-Next and Nemotron also the routed experts; Bolt's trunk and vocabulary head) | off | on | on |
+| Calibrated 3-bit decode copies (`HIBANA_W3_DECODE`; on Flash-Next and Nemotron also the routed experts; Bolt's trunk and vocabulary head) | off | on; Inkling off (its FP8 trunk instead) | on; Inkling off (its FP8 trunk instead) |
 | Device-resident acceptance (`HIBANA_DEVICE_ACCEPT`) | off | Flash-Next and Nemotron | as fast |
 | NVFP4 KV cache (`HIBANA_KV_FORMAT`, [below](#nvfp4-kv)) | FP8 | one Spark: NVFP4 (the 27B and Flash-Next; Nemotron serves FP8 only); two Sparks FP8 | as fast |
 | Budgeted expert selection (`HIBANA_MOE_KEEP`, `HIBANA_MOE_BUDGET`) | off | Flash-Next: keep 4, budget 12:64; Nemotron: keep 12, budget 48:128; Bolt: keep 6, budget 20:64; Inkling: keep 4, budget 12:48 | as fast |
