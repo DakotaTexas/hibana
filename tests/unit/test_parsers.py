@@ -116,3 +116,34 @@ def test_inkling_text_keeps_what_is_not_a_token():
         p.feed(piece)
     p.finish()
     assert p.content == "a <| b <|x|> c" and p.reasoning == ""
+
+
+@pytest.mark.parametrize("body, expected", [
+    ('{"args": {"city": "Paris"}}', ("get_weather", {"city": "Paris"})),  # the header names the tool
+    ('{"name": "get_weather", "arguments": {"city": "Paris"}}', ("get_weather", {"city": "Paris"})),
+    ('{"name": "get_weather", "args": "{\\"city\\": \\"Paris\\"}"}', ("get_weather", {"city": "Paris"})),
+    ('{"name": "get_weather", "args": ["Paris"]}', None),
+    ('{"name": "get_weather", "args": {"city": "Par', None),  # cut off at max_tokens
+])
+def test_inkling_tool_call_that_is_not_one_stays_in_the_content(body, expected):
+    from hibana.api.parsers.inkling import InklingParser
+    p = InklingParser()
+    p.feed("<|message_model|><|content_text|>Checking.<|end_message|><|message_model|>get_weather<|content_invoke_tool_json|>" + body)
+    if expected is not None:
+        p.feed("<|end_message|>")
+    p.finish()
+    content, calls = parse_tool_calls(p.content, None)
+    if expected is None:
+        assert calls == [] and content == "Checking." + body
+    else:
+        assert content == "Checking." and len(calls) == 1
+        assert (calls[0]["function"]["name"], json.loads(calls[0]["function"]["arguments"])) == expected
+
+
+def test_inkling_another_roles_message_ends_the_turn():
+    from hibana.api.parsers.inkling import InklingParser
+    p = InklingParser()
+    p.feed("<|message_model|><|content_text|>Hi.<|end_message|><|message_user|><|content_text|>more"
+           "<|end_message|><|message_model|><|content_text|>not the model's")
+    p.finish()
+    assert p.content == "Hi." and p.reasoning == ""
