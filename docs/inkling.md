@@ -132,8 +132,8 @@ request that resumes from a cached prefix finds its draft context in the pages i
 (`proposers/dspark.py`) keeps one row a request.
 
 A round drafts the block and verifies the first 3 drafts (`HIBANA_SPEC_DEPTHS`): each verified row reads its own
-experts, and the drafts past the third are rarely reached. Past four requests the rows stop sharing a round's
-fixed cost and the profiles decode plainly; the drafter's context for each step's rows is then one batched commit
+experts, and the drafts past the third are rarely reached. Past four requests `exact` decodes plainly and `throughput`
+keeps drafting (at 16 streams 243.3 tokens/s against 196.0); the drafter's context for each step's rows is then one batched commit
 (16 requests: 79.7 ms a step, against 83.4 a request at a time and 79.6 without the drafter). Drafts are the draft's argmax; a sampled request verifies them by
 rejection sampling. The draft runs in a CUDA graph per batch bucket and verify depth, about 7.6 ms a round with the
 BF16 head, nearly half of it the vocabulary head, which a round reads twice: once for the draft's logits, once for
@@ -177,7 +177,8 @@ as DSpark's. Served on one GB10 over the 18 h2h prompts (as [DSpark](#dspark)'s 
 | DFlash2 | 58.6 | 60.6 | 82.6 | 111.8 |
 | DFlash2 verifying 5 / 4 | 55.5 / 55.6 | 51.1 / 58.6 | 80.4 / 81.9 | 109.4 / 107.3 |
 
-and `fast` with up to 16 requests and drafts at every batch (DSpark verifying 3, DFlash2 7):
+and with the FP8 trunk, exact acceptance, up to 16 requests and drafts at every batch (DSpark verifying 3, DFlash2 7),
+before `fast` settled on its sharing budget ([expert sharing](#expert-sharing)):
 
 | | 1 request, greedy | 1 request, T 0.7 | 2 | 4 | 8 | 16 streams |
 |---|---|---|---|---|---|---|
@@ -188,59 +189,36 @@ and `fast` with up to 16 requests and drafts at every batch (DSpark verifying 3,
 | DFlash2, keep 6 with 16:64 | 80.2 | 76.1 | 99.9 | 133.4 | 178.8 | 303.3 |
 
 DFlash2 earns most on math (`exact`, greedy: 87.4 against DSpark's 64.8 tokens/s) and least on prose (44.9 against
-41.4). It shares experts within a wider budget than DSpark, keep 6 with 20 a request up to 80 a call, because it
-verifies 8 rows a request where DSpark verifies 4: replaying teacher-forced GPQA reasoning, that keeps 95.8 / 98.6 /
-99.9% of each row's top-8 routing at 1 / 2 / 4 requests, about what 16:64 keeps for DSpark (96.1 / 99.1 / 100%), where
-16:64 keeps 94.5 / 97.0 / 99.5% of DFlash2's. Sharing buys DFlash2 nothing at 16 streams. MMLU-Pro balanced (420 items,
-sampled with thinking on, 16K cap, four at a time, one seed, exact acceptance), paired with DSpark's `fast`: 79.8%
-against 79.3% (14 better / 12 worse, p 0.85), 3,152 tokens an item against 3,275, 14 answers at the cap against 18.
-At a 16K cap GPQA Diamond mostly counts answers cut off (every config scores 92-95% on the rest), so it is reported
-with the cap count: DFlash2 at 24:96 67.2% (54 capped) and at 16:64 65.2% (60) against DSpark's 69.7% (51).
-
-Soft acceptance (s 0.5) took DFlash2's drafts far more often (one request at T 0.7 +17%) and moved neither GPQA (65.2%
-either way, 15 answers newly at the cap against 11 freed, tokens x1.01) nor, as with DSpark, accuracy on finished
-answers. DSpark's drafts are point masses, which the sampled rule accepts with probability min(1, p e^s); DFlash2's are
-drawn from a law near the target's. One seed, so `fast` applies DSpark's s = 0.25 to both.
+41.4). Both drafters share experts within the same budget ([expert sharing](#expert-sharing)) and accept softly within
+the same gate ([relaxed verification](#relaxed-verification)); DSpark's drafts are point masses, which the sampled rule
+accepts with probability min(1, p e^s), and DFlash2's are drawn from a law near the target's.
 
 ## Expert sharing
 
 `HIBANA_MOE_KEEP` / `HIBANA_MOE_BUDGET` ([operations](operations.md#serving-profiles)) apply to decode and verification
 calls with Nemotron's selection (`route_budget`): every row keeps its top F experts, its other top-8 experts ride
 along when the call's set holds them, and the set grows past the rows' floors by summed routing weight up to the cap.
-With DFlash2 (the default) `fast` and `throughput` keep 6 with 20 a request up to 80 a call ([DFlash2](#dflash2)); with
-DSpark `fast` keeps 6 with 16 a request up to 64 a call and `throughput` keeps 4 with a cap of 20, which does better at
-8-16 streams. `exact` shares none. Closed-loop streams over the 18 h2h prompts (thinking off, greedy, `HIBANA_MAX_BATCH=16`),
-all streams' tokens/s, off against keep 4 with a cap of 20:
+The cap is per call, min(B, P x requests), and each row's top F stays in past it. `fast` and `throughput` keep 4 with
+12 a request up to 48 a call with either drafter; `exact` shares none.
 
-| | 1 | 2 | 4 | 8 | 16 streams |
-|---|---|---|---|---|---|
-| BF16 trunk, no drafter | 38.1 -> 37.7 | 58.9 -> 58.6 | 81.4 -> 97.0 | 114.4 -> 152.2 | 160.2 -> 211.3 |
-| `exact` (verify 3 at 1-4 requests) | 45.4 -> 44.7 | 68.4 -> 81.5 | 95.6 -> 117.8 | 111.6 -> 153.1 | 153.1 -> 199.2 |
+Accuracy, sampled at temperature 1.0 with thinking on, 16 requests a server, 3 seeds an arm, paired problem by problem
+with the same drafter's `exact` run (95% bootstrap intervals over problems). LiveCodeBench v6 (454 problems) at a 256K
+output cap, every arm on one build: keep 4 with 12:48 DSpark 82.6% against 83.3% (-0.66, -2.42 to +0.95), DFlash2
+83.0% against 82.9% (+0.07, -1.69 to +1.84), with 2.4% and 1.8% of answers at the cap against 1.8% and 1.7%. At a
+192K cap, against each drafter's `exact` run (83.5% / 83.0%), and on GPQA Diamond (198, 120K cap) against its own:
 
-On the replies' teacher-forced routes, keep 4 with a cap of 20 reads 19.7 experts a visit instead of 26.3 at four
-streams (88% of the routing weight kept), 25.4 instead of 44.2 at eight (77%) and 41.3 instead of 66.2 at sixteen
-(83%). One stream reads its own 8 either way. GSM8K-200 four at a time (`exact`, to 1,024 tokens), paired against
-sharing off (95.0%): keep 4 with a cap of 20 93.0% (1 better / 5 worse, p 0.22); keep 4 with 6 a request up to 48,
-which also cuts a request alone to 6 experts a row (1 request: 45.4 -> 53.7 tokens/s), 94.5% (3 / 4).
+| Sharing | Experts a call reads at 16 requests | LiveCodeBench, DSpark / DFlash2 | GPQA change, DSpark / DFlash2 |
+|---|---|---|---|
+| none | 89.5 / 90.2 | 83.5% / 83.0% | - |
+| keep 2, 6 a request, 24 a call | 50.2 / 50.7 | 80.5% / 80.4% (-2.9 / -2.6) | +2.2 / +0.7 |
+| keep 2, 12 a request, 48 a call | 53.3 / 53.6 | 81.1% / 81.8% (-2.4 / -1.2) | +1.2 / 0.0 |
+| keep 4, 12 a request, 48 a call (`fast`) | 68.4 / 68.9 | 82.3% / 82.3% (-1.2 / -0.7) | +2.2 / +0.3 |
 
-GSM8K did not show what long reasoning does. On GPQA Diamond (198 items, sampled at temperature 1.0 with thinking on,
-16,384-token cap, 4 requests at a time), each setting with the FP8 trunk and DSpark, paired with the FP8 trunk
-without sharing (69.7%). The budget is per call, min(cap, per-request x requests): a request's 4-row verify reads
-18.0 experts unshared, four requests' 16 rows 46.0 (replaying `route_budget` over Inkling's own GPQA reasoning).
-
-| Sharing | Experts a call reads, 1 / 4 requests | GPQA | Paired | Answers at the cap |
-|---|---|---|---|---|
-| keep 6, 16 a request, 64 a call (`fast`) | 15.8 / 45.9 | 69.7% | 12 / 12, p 1.0 | 51 of 51 |
-| keep 6, 16 a request, 24 a call | 15.8 / 37.4 | 64.1% | p 0.061 | 63 |
-| keep 6, 12 a request, 64 a call | 14.4 / - | 66.2% | p 0.21 | 58 |
-| keep 5, 10 a request, 64 a call | 12.2 / - | 67.2% | p 0.38 | 56 |
-| keep 4, 6 a request, 48 a call | 9.8 / 28.7 | 62.1% | p 0.014 | 66 |
-
-Sharing that binds across requests costs long reasoning: answers think longer and run into the cap (keep 4 at 6 a
-request wrote 1.10x the tokens; the BF16 trunk with it scored 63.6%, so the sharing, not the FP8 trunk, cost it). The
-share of routing weight kept does not predict it: keep 6 at 24 a call kept 95% of four requests' routing and lost 5.6
-points. So `fast` shares only inside a request alone, whose verify rows read 15.8 of 18.0 experts (+7% at one request);
-from two requests on, 64 a call is above what the rows need.
+GPQA, at 16 settings from keep 2 to keep 6 and 6:24 to 64:128, stayed within 1.7 points of exact either way for
+DFlash2 and above it for DSpark; LiveCodeBench separates them. Experts a call reads come from replaying recorded router
+traffic. At temperature 1.0 over the 18 h2h prompts (thinking off, 1,024 tokens, one Spark), keep 4 with 12:48 decodes
+DSpark +20 / +9 / +26 / +17% and DFlash2 +22 / +25 / +16 / +17% over no sharing at 1 / 4 / 8 / 16 requests (`exact`
+acceptance).
 
 ## Relaxed verification
 
@@ -256,6 +234,20 @@ every batch size, paired with exact acceptance at 68.7%): s = 0.25 68.7% (53 ans
 66.5 -> 73.8 tok/s at s = 0.25 (75.1 at 0.5), 2 streams 85.0 -> 88.2, 4 streams 110.9 -> 114.8. Greedy relaxed
 acceptance cost MMLU-Pro greedy (200, thinking on): top-3 within 2.0 77.0% against 83.5% (p 0.004), top-2 within 1.0
 79.5% against 82.0% (p 0.27), so greedy requests stay exact.
+
+`fast` as served, the gated rule at s = 0.25 with keep 4 with 12:48 sharing, paired with the same build's `exact` (16
+requests a server, LiveCodeBench v6 at 256K with 4 seeds, GPQA Diamond at 120K with 3): DSpark -0.66 points (-2.07 to
++0.73) and -0.51 (-2.36 to +1.35), DFlash2 -0.07 (-1.89 to +1.69) and -0.51 (-2.86 to +2.02). At s = 0.5 the same
+stack lost LiveCodeBench 2.1 points with DSpark (-3.89 to -0.44) and 2.8 with DFlash2 (-4.77 to -0.73), its answers
+20-24% longer and more of them at the cap. At temperature 1.0 over the 18 h2h prompts (thinking off, 1,024 tokens, one
+Spark, drafts at every batch; 8 and 16 requests are `throughput`) it decodes, against `exact`:
+
+| tokens/s | 1 | 4 | 8 | 16 requests |
+|---|---|---|---|---|
+| DSpark, `exact` | 62.2 | 107.5 | 156.4 | 246.2 |
+| DSpark, `fast` | 78.2 | 126.2 | 207.4 | 303.0 |
+| DFlash2, `exact` | 69.2 | 126.7 | 191.8 | 303.4 |
+| DFlash2, `fast` | 93.0 | 164.7 | 241.4 | 369.4 |
 
 ## Memory
 

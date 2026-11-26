@@ -119,7 +119,7 @@ def profile_defaults(profile: str, target: str, flashnext_experts: str = "w3", t
         # Greedy requests are verified exactly in every profile, sampled ones in `exact` (fast and throughput: s = 0.25
         # gated 3:2.0, below). DSpark: a round verifies the first 3 of the 7: a verified row costs
         # its own experts, and drafts past the third are rarely reached; depth by acceptance up to 7
-        # (HIBANA_SPEC_STEP_COST) was within noise of it. Past four requests plain decode wins. Served tok/s over the
+        # (HIBANA_SPEC_STEP_COST) was within noise of it. Past four requests `exact` decodes plainly. Served tok/s over the
         # 18 h2h prompts (thinking off, to 1,024 tokens), one request greedy / T 0.7 (median), then 2 / 4 closed-loop
         # streams in all: BF16 trunk with the drafter 56.6 / 51.7, 72.7 / 99.9, without 39.6 / 38.9, 61.0 / 85.7; FP8
         # trunk with the drafter 68.5 / 65.7, 84.5 / 109.9. The SSD tier stores each visit's K/V and convolution
@@ -138,12 +138,13 @@ def profile_defaults(profile: str, target: str, flashnext_experts: str = "w3", t
         # token streams 3.6 GB of weights instead of 5.4. GSM8K-200, four at a time: 95.5% against exact's 96.0%.
         # tools/lossy_gate.py --target inkling judges it, its first layer on the decode step.
         p["HIBANA_INKLING_TRUNK"] = "fp8"
-        # and expert sharing in decode and verification (lossy, Nemotron's selection): each row keeps its top 6 of 8
-        # experts, and a call reads at most 16 a request and 64 in all, so it binds only inside a request alone (a
-        # 4-row verify reads 15.8 of 18 experts: +7% at one request). On GPQA Diamond (sampled with thinking on, 16K
-        # cap, 4 requests) it scores as the FP8 trunk alone, 69.7% each; sharing that binds across requests cost long
-        # reasoning: 64.1% at 24 a call, 62.1% at keep 4 with 6 a request (answers thought longer, ran into the cap).
-        p.update(HIBANA_MOE_KEEP="6", HIBANA_MOE_BUDGET="16:64")
+        # and expert sharing in decode and verification (lossy, Nemotron's selection): each row keeps its top 4 of 8
+        # experts, and a call reads at most 12 a request and 48 in all. LiveCodeBench v6 (454 problems, sampled with
+        # thinking on, 256K cap, 16 requests, 3 seeds) paired against exact: DSpark -0.66 points (95% -2.42 to +0.95),
+        # DFlash2 +0.07 (-1.69 to +1.84); keeping 2 (6:24, 12:48) lost 1.2 to 2.9 points at a 192K cap. Speed at T 1.0
+        # (18 h2h prompts, 1 / 4 / 8 / 16 requests) over exact: DSpark +20 / +9 / +26 / +17%, DFlash2 +22 / +25 / +16 /
+        # +17%.
+        p.update(HIBANA_MOE_KEEP="4", HIBANA_MOE_BUDGET="12:48")
         # sampled requests: soft acceptance s = 0.25. DSpark's drafts are single tokens, so the rule accepts a draft
         # with min(1, p e^s): GPQA (sampled, thinking on, 16 requests) 68.7% at s = 0.25 and at exact, 61.6% at
         # s = 0.5 (longer answers, more at the cap). T 0.7 h2h: one request +11%, 2 / 4 streams +4%. Greedy requests
@@ -152,24 +153,16 @@ def profile_defaults(profile: str, target: str, flashnext_experts: str = "w3", t
         # gated to drafts the target ranks within its top 3 and within 2.0 nats of its top token: a draft outside takes
         # the exact test, so it never comes out more often than the target gives it. Speed at T 1.0 (one Spark, 18 h2h
         # prompts, no sharing, 1 / 4 / 8 / 16 requests) against exact: DSpark +7 / +5 / +4 / +6%, DFlash2 +4 / +10 / +6
-        # / +7%, where the ungated rule gave +5 / +5 / +6 / +7% and +10 / +6 / +8 / +12%.
+        # / +7%, where the ungated rule gave +5 / +5 / +6 / +7% and +10 / +6 / +8 / +12%. With sharing, paired against
+        # exact (16 requests, 3 to 4 seeds), LiveCodeBench at 256K / GPQA Diamond at 120K: DSpark -0.66 / -0.51 points,
+        # DFlash2 -0.07 / -0.51, every interval across zero; at s = 0.5 the same stack lost 2.1 (DSpark) and 2.8
+        # (DFlash2) points on LiveCodeBench.
         p["HIBANA_ACCEPT_SOFT_GATE"] = "3:2.0"
-        if proposer == "dflash2":
-            # DFlash2 verifies 8 rows a request where DSpark verifies 4, so its budget is wider: keep 6 with 20 a request up
-            # to 80 a call keeps the routing 16:64 keeps for DSpark's rows (replaying GPQA reasoning, each row's top-8
-            # score mass at 1 / 2 / 4 requests: 95.8 / 98.6 / 99.9% against 96.1 / 99.1 / 100%). MMLU-Pro balanced (420,
-            # sampled with thinking on, 4 requests, exact acceptance): 79.8% against DSpark's 79.3% (p 0.85), answers 4%
-            # shorter, 14 at the 16K cap against 18. h2h with drafts at every batch: 73.4 / 72.5, 96.7 / 128.5 / 176.9 /
-            # 304.8 tok/s against DSpark's 72.1 / 67.0, 86.7 / 112.3 / 173.3 / 243.3 (one request greedy / T 0.7, then
-            # 2 / 4 / 8 / 16 streams). Soft acceptance's accuracy is unmeasured with these drafts (its speed is above).
-            p.update(HIBANA_MOE_KEEP="6", HIBANA_MOE_BUDGET="20:80")
         if profile == "throughput":
-            # a flat cap of 20 at keep 4 did better at 8-16 streams (exact: +31% / +33% against +5% / +25%)
-            p.update(HIBANA_MAX_BATCH="16", HIBANA_MOE_KEEP="4", HIBANA_MOE_BUDGET="20")
-            if proposer == "dflash2":
-                # DFlash2 drafts at every batch: at 16 streams verifying its 7 drafts gave 304.8 tok/s against 196.0 for
-                # plain decode (keep 6, 16:64), and sharing changed nothing there. Accuracy above 4 requests is unmeasured.
-                p.update(HIBANA_SPEC_DEPTHS="1:7,2:7,4:7,8:7,16:7", HIBANA_MOE_KEEP="6", HIBANA_MOE_BUDGET="20:80")
+            # both drafters draft at every batch: at 8 / 16 streams (keep 6, 16:64) DSpark gave 173.3 / 243.3 tok/s and
+            # DFlash2 176.9 / 304.8 against 125.8 / 196.0 for plain decode
+            d = "7" if proposer == "dflash2" else "3"
+            p.update(HIBANA_MAX_BATCH="16", HIBANA_SPEC_DEPTHS=",".join(f"{n}:{d}" for n in (1, 2, 4, 8, 16)))
         return p
     flashnext = target == "flashnext"
     if profile == "exact":

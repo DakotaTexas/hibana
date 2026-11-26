@@ -209,7 +209,7 @@ the config file wins. `/get_server_info` reports the profile under `config`.
 | Calibrated 3-bit decode copies (`HIBANA_W3_DECODE`; on Flash-Next and Nemotron also the routed experts; Bolt's trunk and vocabulary head) | off | on | on |
 | Device-resident acceptance (`HIBANA_DEVICE_ACCEPT`) | off | Flash-Next and Nemotron | as fast |
 | NVFP4 KV cache (`HIBANA_KV_FORMAT`, [below](#nvfp4-kv)) | FP8 | one Spark: NVFP4 (the 27B and Flash-Next; Nemotron serves FP8 only); two Sparks FP8 | as fast |
-| Budgeted expert selection (`HIBANA_MOE_KEEP`, `HIBANA_MOE_BUDGET`) | off | Flash-Next: keep 4, budget 12:64; Nemotron: keep 12, budget 48:128; Bolt: keep 6, budget 20:64; Inkling: keep 6, budget 20:80 (DSpark 16:64) | as fast; Inkling with DSpark: keep 4, cap 20 |
+| Budgeted expert selection (`HIBANA_MOE_KEEP`, `HIBANA_MOE_BUDGET`) | off | Flash-Next: keep 4, budget 12:64; Nemotron: keep 12, budget 48:128; Bolt: keep 6, budget 20:64; Inkling: keep 4, budget 12:48 | as fast |
 | Optimized QSA prefill kernels (`HIBANA_QSA_PREFILL_BACKEND`) | off (original) | Flash-Next: auto (where eligible: SM121, one or two Sparks, through 32K) | as fast |
 | Requests decoded together (`HIBANA_MAX_BATCH`) | 4 | 4 | 27B and Inkling 16; Flash-Next 128 (64 with NVFP4 experts) |
 | Reduced recurrent state (`HIBANA_SSM_STATE`) | off (FP32) | Nemotron: FP16 with stochastic rounding; Bolt: int8; else FP32 | 8-bit GDN state; Nemotron FP16 with stochastic rounding; Bolt int8 |
@@ -249,8 +249,8 @@ Four of the knobs take more than the table shows:
   `HIBANA_MOE_KEEP=0` routes in full. A token's experts depend on the rest of its forward, so a greedy reply can change
   with what else the server runs. Nemotron's selection (22 of 512 experts a token) keeps k as each row's floor, lets a
   row's other top-22 experts ride along when the forward reads them anyway, and fills the cap by summed routing weight
-  ([how](nemotron.md#serving)). Inkling (8 of 128) selects as Nemotron does: with DFlash2 `fast` and `throughput` keep 6 with 20 a request up to 80; with DSpark `fast` keeps 6 with 16 up to 64, `throughput` 4 with a cap of 20
-  ([numbers](inkling.md#expert-sharing)).
+  ([how](nemotron.md#serving)). Inkling (8 of 128) selects as Nemotron does: `fast` and `throughput` keep 4 with 12 a request up to 48, with either
+  drafter ([numbers](inkling.md#expert-sharing)).
 - **`HIBANA_SSM_STATE=fp32|int8|int4|fp16_sr`**: the integer formats quantize each recurrent layer's state per window as
   in LeapQuant ([arXiv 2609.38166](https://arxiv.org/abs/2609.38166); `hibana/cache/ssm_format.py`), a fraction of
   FP32's memory per slot, and need `HIBANA_VERIFY_STATE=reconstruct` (with `snapshots` the state stays FP32). The

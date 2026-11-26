@@ -101,6 +101,12 @@ def test_inkling_drafts_with_dflash2_unless_told_dspark(env):
     assert s.get("HIBANA_SPEC") == "7" and s.get("HIBANA_SPEC_DEPTHS") == "1:7,2:7,4:7"
     d = resolve({**env, "HIBANA_PROPOSER": "dspark"}, "inkling")
     assert d.proposer == "dspark" and d.get("HIBANA_SPEC_DEPTHS") == "1:3,2:3,4:3" and "--draft" not in d.engine_args()
+    for p in ("dflash2", "dspark"):
+        for profile in ("fast", "throughput"):
+            r = resolve({**env, "HIBANA_PROPOSER": p}, "inkling", profile)
+            assert (r.get("HIBANA_MOE_KEEP"), r.get("HIBANA_MOE_BUDGET")) == ("4", "12:48")
+    t = resolve({**env, "HIBANA_PROPOSER": "dspark"}, "inkling", "throughput")
+    assert t.get("HIBANA_SPEC_DEPTHS") == "1:3,2:3,4:3,8:3,16:3"
 
 
 @pytest.mark.parametrize("value", ["inf", "nan", "-0.5", "x"])
