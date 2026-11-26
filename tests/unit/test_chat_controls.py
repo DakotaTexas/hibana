@@ -209,3 +209,31 @@ def test_models_reports_the_served_context_length():
         assert data == [{'id': 'RadixArk/Test', 'object': 'model', 'owned_by': 'hibana',
                          'root': 'RadixArk/Test', 'max_model_len': 1000}]
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('default, kwargs, expected', [
+    (True, None, True), (False, None, False),
+    (False, {'enable_thinking': True}, True), (True, {'enable_thinking': False}, False),
+])
+@pytest.mark.parametrize('route', ['/v1/chat/completions', '/v1/messages', '/v1/messages/count_tokens'])
+def test_thinking_default_is_fixed_at_app_creation_and_a_request_overrides_it(default, kwargs, expected, route):
+    from hibana.engine import config
+    async def scenario():
+        queue = asyncio.Queue()
+        queue.put_nowait(([5], True, 'stop'))
+        engine = SimpleNamespace(submit=AsyncMock(return_value=SimpleNamespace(queue=queue, req=SimpleNamespace(prefix_len=0))), cancel=Mock())
+        tok = SimpleNamespace(encode=Mock(return_value=[1]), decode=lambda ids, **kwargs: 'ok')
+        template = SimpleNamespace(render=Mock(return_value='prompt'))
+        with config.using(config.current().replace(default_thinking=default)):
+            app = create_app(engine, tok, template, {})
+        body = {'messages': [{'role': 'user', 'content': 'hi'}]}
+        if route == '/v1/messages':
+            body['max_tokens'] = 8
+        if kwargs is not None:
+            body['chat_template_kwargs'] = kwargs
+        with config.using(config.current().replace(default_thinking=not default)):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url='http://test') as client:
+                response = await client.post(route, json=body)
+        assert response.status_code == 200
+        assert template.render.call_args.kwargs['enable_thinking'] is expected
+    asyncio.run(scenario())
