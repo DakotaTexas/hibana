@@ -249,3 +249,8 @@ def test_server_soft_gate_default():
     finally:
         validation.set_accept_default(1, 0.0)
     assert validation.ACCEPT_SOFT_GATE == (1, 0.0) and _sampling_from({"temperature": 1.0, "accept_soft": 0.5}).soft_gate is None
+    # no server gate: one field alone gates nothing (the rule stays ungated, as before sampled requests read the fields)
+    for one in ({"accept_top_k": 3}, {"accept_margin": 1.0}, {"sampling_params": {"accept_top_k": 3}}):
+        assert _sampling_from({"temperature": 1.0, "accept_soft": 0.5, **one}).soft_gate is None, one
+    assert _sampling_from({"temperature": 1.0, "accept_soft": 0.5, "accept_top_k": 3, "accept_margin": 2.0}).soft_gate == (3, 2.0)
+    assert _sampling_from({"temperature": 0.0, "accept_top_k": 3}).accept_top_k == 3  # greedy requests keep their fields

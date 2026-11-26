@@ -75,8 +75,9 @@ benchmark_workloads.py  the fixed benchmark prompts (code, design, reasoning) th
 | Tensor parallel on two Sparks | yes | yes | no | no |
 | Image input ([API](api.md#images)) | no | no | yes | yes |
 
-Inkling-2-Mini is outside the matrix: its bundled DSpark drafter (a block of 7, the first 3 verified, exactly), decode
-and verify graphs with exact arithmetic in every profile, the prefix cache without the SSD tier, text only, one Spark
+Inkling-2-Mini is outside the matrix: incoai's DFlash2 draft (all 7 verified) or its bundled DSpark drafter (a block of
+7, the first 3 verified), decode and verify graphs, exact arithmetic in `exact` and an FP8 trunk, expert sharing and
+gated soft acceptance in `fast` and `throughput`, the prefix cache with the SSD tier, text only, one Spark
 ([details](inkling.md)).
 
 ## Repository boundaries

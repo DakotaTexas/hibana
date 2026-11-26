@@ -15,10 +15,11 @@ unified memory, NVIDIA driver 580 or newer, the CUDA 13 toolkit in `/usr/local/c
 and Hibana compile their GB10 kernels on first use) and [uv](https://docs.astral.sh/uv/). `--detach` also needs a
 user systemd session (`loginctl enable-linger` keeps it after logout).
 
-Four targets, one per process, chosen by name: `27b` (`RadixArk/Qwen3.8-27B-NVFP4` at `319f741`, with the DFlash2
+Five targets, one per process, chosen by name: `27b` (`RadixArk/Qwen3.8-27B-NVFP4` at `319f741`, with the DFlash2
 drafter `incoai/Qwen3.8-27B-DFlash2` at `dedf8df`), `flashnext` (`RadixArk/Qwen3.8-Flash-Next-NVFP4` at
 `7b71922`, its own MTP head, or the DFlash2 drafter `incoai/Qwen3.8-Flash-Next-DFlash2` at `a22a174` on one Spark),
-and on one Spark `nemotron` ([Nemotron 3.5 Super](nemotron.md)) and `bolt` ([Nemotron 3.5 Bolt](bolt.md)).
+and on one Spark `nemotron` ([Nemotron 3.5 Super](nemotron.md)), `bolt` ([Nemotron 3.5 Bolt](bolt.md)) and
+`inkling` ([Inkling 2 Mini](inkling.md)).
 `hibana serve` downloads whatever the cache lacks (about 26 GB for the 27B, 135 GB for
 Flash-Next, 75 GB for Nemotron Super, 25 GB for Bolt, and in `fast` and `throughput` the calibrated 3-bit checkpoint:
 10, 51 and 49 GB, none for Bolt) after checking free disk; serving itself runs offline.
@@ -77,12 +78,12 @@ same) and results, traces, 3-bit checkpoints and logs in `HIBANA_RESULTS` (defau
 | Proposer / draft proposals | 27B: DFlash2, 15 (16 verify rows); Flash-Next: MTP, 4 (`fast`: up to 8, adaptive, below), or with `HIBANA_PROPOSER=dflash2` (one Spark) DFlash2, 9 (`exact`: 7, `throughput`: 4); Inkling: DFlash2, 7 (`HIBANA_PROPOSER=dspark`: its bundled DSpark, 7, of which 3 are verified) | `HIBANA_PROPOSER`, `HIBANA_SPEC` (0 = plain decode; with adaptive depth, the cap) |
 | Draft precision | 27B: FP8; Flash-Next: BF16 (MTP), FP8 (DFlash2) | `HIBANA_DRAFT_PRECISION=bf16` for the 27B publisher's precision |
 | Draft checkpoint | the publisher's pinned draft | `hibana serve --draft DIR` or `HIBANA_DRAFT=/dir`: a DFlash2 checkpoint of the same architecture, trained on the served target's features |
-| Accepted state | reconstruction | `HIBANA_VERIFY_STATE` |
+| Accepted state | reconstruction; Inkling: snapshots (no recurrent state) | `HIBANA_VERIFY_STATE` |
 | Context per request (prompt plus output) | 262,144 | `HIBANA_MAX_CONTEXT` / `hibana serve --context-length`. The pool guarantees one request at that length (8 GiB of FP8 KV at 262K; 4.5 GiB as NVFP4) or four at 32K, whichever is more; concurrent requests share the rest and a request that does not fit waits |
 | Adaptive verification (DFlash2) | the 27B's `throughput`: on; `exact`, `fast`: off; Flash-Next: none | `HIBANA_SPEC_POLICY=budget\|fixed`: the drafts' calibrated scores and the measured verify costs decide what each round verifies, up to `HIBANA_SPEC` ([below](#adaptive-verification-dflash2)); a `HIBANA_SPEC_DEPTHS` table caps each bucket (no 0 under it); not with `HIBANA_SPEC_STEP_COST` |
 | Verify depth per batch size | the proposer's depth at every batch; Flash-Next `fast`: `2:7,4:6` on one Spark, `2:4,4:4` on two, `throughput`: `16:3,32:3,64:3,128:3` (3-bit experts on one Spark), else `16:3`; Flash-Next DFlash2 `fast`: `2:7,4:7`, `throughput`: MTP's | `HIBANA_SPEC_DEPTHS=BUCKET:DEPTH,...` (0 = plain decode; a profile's buckets stay within `HIBANA_SPEC` and `HIBANA_MAX_BATCH`, a limit between buckets verifying what the bucket it pads to does). The 3-bit copies serve calls of at most 128 rows on the 27B and 64 on Flash-Next, so wider verifications run the original weights |
 | Adaptive draft depth (MTP and DFlash2) | Flash-Next `fast` with MTP: on, 0.14 (0.2 on two Sparks); DFlash2: off | `HIBANA_SPEC_STEP_COST` (0 = the fixed depth): each request drafts as deep as its own recent acceptance pays for, up to the batch bucket's depth ([MTP](flashnext.md#the-mtp-draft), [DFlash2](flashnext.md#the-dflash2-draft)) |
-| Port / service (with `--detach`) | 27B 30001 / `hibana-qwen38`, Flash-Next 30004 / `hibana-flashnext`, Nemotron 30005 / `hibana-nemotron`, Bolt 30006 / `hibana-bolt` | `hibana serve --port`, `HIBANA_PORT` / `HIBANA_SERVICE` |
+| Port / service (with `--detach`) | 27B 30001 / `hibana-qwen38`, Flash-Next 30004 / `hibana-flashnext`, Nemotron 30005 / `hibana-nemotron`, Bolt 30006 / `hibana-bolt`, Inkling 30007 / `hibana-inkling` | `hibana serve --port`, `HIBANA_PORT` / `HIBANA_SERVICE` |
 | Request traces | off | `hibana serve --traces` (in `$HIBANA_RESULTS/traces`) or `HIBANA_TRACES=/dir` (cap `HIBANA_TRACES_MAX_MIB`, 32768) |
 | Calibrated 3-bit checkpoint | `$HIBANA_RESULTS/w3-checkpoints/<target>-current`, kept on the pinned published revision at every serve ([how](w3-calibration.md#where-the-served-copies-come-from)) | `HIBANA_W3_CHECKPOINT=/dir`. Without one the 27B rounds to nearest and Flash-Next serves its FP8 trunk; the preflight and `/get_server_info` (`w3_warning`) say so ([calibration](w3-calibration.md)) |
 | Flash-Next routed experts | the W3 checkpoint's 3-bit experts when it carries them (`fast`, `throughput`) | `HIBANA_FLASHNEXT_EXPERTS=nvfp4` keeps the checkpoint's NVFP4 experts |
@@ -90,8 +91,8 @@ same) and results, traces, 3-bit checkpoints and logs in `HIBANA_RESULTS` (defau
 | Image input | Nemotron and Bolt: on (their vision encoder, 1.6 GiB); the 27B and Flash-Next: none | `HIBANA_VISION=0` leaves the encoder's memory to the pools; images are then a 400 ([API](api.md#images)) |
 | Shape-stable prefill numerics | off | `HIBANA_STABLE_NUMERICS=1` (M-invariant kernels for the three row-count-dependent ops; see [limits](#numerical-limits)) |
 
-For MTP on the 27B, use `HIBANA_PROPOSER=mtp HIBANA_SPEC=3 HIBANA_DRAFT_PRECISION=bf16`. `HIBANA_PROPOSER` is `mtp`
-or `dflash2`.
+For MTP on the 27B, use `HIBANA_PROPOSER=mtp HIBANA_SPEC=3 HIBANA_DRAFT_PRECISION=bf16`. `HIBANA_PROPOSER` is `mtp`,
+`dflash2` or, on Inkling, `dspark`.
 
 Further settings, for tuning, diagnostics and the tools (defaults from `engine/config.py`, `launch/` and `tools/`):
 
@@ -201,23 +202,23 @@ the config file wins. `/get_server_info` reports the profile under `config`.
 
 | Knob | exact | fast (default) | throughput |
 |---|---|---|---|
-| Relaxed acceptance, greedy requests (`HIBANA_ACCEPT_DEFAULT`) | off | top-3 within 2.0 logits; Flash-Next DFlash2 top-2 within 1.0; Bolt off | as fast |
+| Relaxed acceptance, greedy requests (`HIBANA_ACCEPT_DEFAULT`) | off | top-3 within 2.0 logits; Flash-Next DFlash2 top-2 within 1.0; Bolt and Inkling off | as fast |
 | Relaxed acceptance, sampled requests (`HIBANA_ACCEPT_SOFT`, `accept_soft` in the [API](api.md)) | 0 (exact) | Flash-Next and Nemotron s = 0.5; Inkling 0.25; the 27B and Bolt 0 (exact) | as fast |
 | Gate on sampled relaxed acceptance (`HIBANA_ACCEPT_SOFT_GATE`, K:M: e^s only for drafts in the target's top K within M nats of its top token) | off | Inkling 3:2.0; else off (every draft) | as fast |
 | Sampled MTP drafts (`HIBANA_MTP_SAMPLE`, [below](#sampled-mtp-drafts)) | off | on where MTP drafts | as fast |
 | Calibrated 3-bit decode copies (`HIBANA_W3_DECODE`; on Flash-Next and Nemotron also the routed experts; Bolt's trunk and vocabulary head) | off | on | on |
 | Device-resident acceptance (`HIBANA_DEVICE_ACCEPT`) | off | Flash-Next and Nemotron | as fast |
 | NVFP4 KV cache (`HIBANA_KV_FORMAT`, [below](#nvfp4-kv)) | FP8 | one Spark: NVFP4 (the 27B and Flash-Next; Nemotron serves FP8 only); two Sparks FP8 | as fast |
-| Budgeted expert selection (`HIBANA_MOE_KEEP`, `HIBANA_MOE_BUDGET`) | off | Flash-Next: keep 4, budget 12:64; Nemotron: keep 12, budget 48:128; Bolt: keep 6, budget 20:64 | as fast |
+| Budgeted expert selection (`HIBANA_MOE_KEEP`, `HIBANA_MOE_BUDGET`) | off | Flash-Next: keep 4, budget 12:64; Nemotron: keep 12, budget 48:128; Bolt: keep 6, budget 20:64; Inkling: keep 6, budget 20:80 (DSpark 16:64) | as fast; Inkling with DSpark: keep 4, cap 20 |
 | Optimized QSA prefill kernels (`HIBANA_QSA_PREFILL_BACKEND`) | off (original) | Flash-Next: auto (where eligible: SM121, one or two Sparks, through 32K) | as fast |
-| Requests decoded together (`HIBANA_MAX_BATCH`) | 4 | 4 | 27B 16; Flash-Next 128 (64 with NVFP4 experts) |
+| Requests decoded together (`HIBANA_MAX_BATCH`) | 4 | 4 | 27B and Inkling 16; Flash-Next 128 (64 with NVFP4 experts) |
 | Reduced recurrent state (`HIBANA_SSM_STATE`) | off (FP32) | Nemotron: FP16 with stochastic rounding; Bolt: int8; else FP32 | 8-bit GDN state; Nemotron FP16 with stochastic rounding; Bolt int8 |
 
 Relaxed acceptance for greedy requests accepts a drafted token the target ranks within its top-k and within a logit
 margin of its argmax, so outputs are no longer the target's exact greedy continuation; a request can pin exact
 acceptance with `accept_top_k: 1` ([API](api.md)). Sampled requests have one rule, s: a drafted token y is also
 accepted when u · q(y) < e^s · p(y), so no token comes out more than e^s times as often as the target's law gives
-it; `accept_soft: 0` pins exact sampling. `HIBANA_ACCEPT_SOFT_GATE=K:M` (off in every profile) limits e^s to drafts
+it; `accept_soft: 0` pins exact sampling. `HIBANA_ACCEPT_SOFT_GATE=K:M` (Inkling's `fast` and `throughput` 3:2.0, else off) limits e^s to drafts
 the target ranks within its top K and within M nats of its top token; a draft outside takes the exact test, so it
 never comes out more often than the target gives it. Sampled with thinking on at 4 requests on one Spark, s = 0.5 decodes
 Flash-Next with MTP at 216 tok/s against 183 exact, and the 27B with DFlash2 at 195 against 165. On GPQA-D with thinking
@@ -248,7 +249,7 @@ Four of the knobs take more than the table shows:
   `HIBANA_MOE_KEEP=0` routes in full. A token's experts depend on the rest of its forward, so a greedy reply can change
   with what else the server runs. Nemotron's selection (22 of 512 experts a token) keeps k as each row's floor, lets a
   row's other top-22 experts ride along when the forward reads them anyway, and fills the cap by summed routing weight
-  ([how](nemotron.md#serving)). Inkling (8 of 128) selects as Nemotron does: `fast` keeps 6 with 16 a request up to 64, `throughput` 4 with a cap of 20
+  ([how](nemotron.md#serving)). Inkling (8 of 128) selects as Nemotron does: with DFlash2 `fast` and `throughput` keep 6 with 20 a request up to 80; with DSpark `fast` keeps 6 with 16 up to 64, `throughput` 4 with a cap of 20
   ([numbers](inkling.md#expert-sharing)).
 - **`HIBANA_SSM_STATE=fp32|int8|int4|fp16_sr`**: the integer formats quantize each recurrent layer's state per window as
   in LeapQuant ([arXiv 2609.38166](https://arxiv.org/abs/2609.38166); `hibana/cache/ssm_format.py`), a fraction of

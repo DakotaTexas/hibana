@@ -9,6 +9,7 @@ import pytest
 
 from hibana import cli
 from hibana.launch import ctl, preflight, run, service
+from hibana.launch.settings import target_name
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -239,6 +240,9 @@ def test_launch_sets_up_each_agent_for_the_serving_target(home, monkeypatch, tmp
     assert env["ANTHROPIC_MODEL"] == "claude-hibana-qwen3.8-27b"  # contains "claude" and names the serving model
     cli.main(["launch", "--target", "nemotron", "claude"])
     assert launched[-1][1]["ANTHROPIC_MODEL"] == "claude-hibana-nemotron-3.5-super"
+    cli.main(["launch", "--target", "inkling", "claude"])
+    assert launched[-1][1]["ANTHROPIC_MODEL"] == "claude-hibana-inkling-2-mini"
+    assert {target_name(t) for t in run.SERVED} == set(ctl.ALIASES)  # every served target has a model name for the agents
     cli.main(["launch", "--target", "flashnext", "opencode"])
     command, env = launched[-1]
     config = json.loads(Path(env["OPENCODE_CONFIG"]).read_text())

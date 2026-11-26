@@ -128,7 +128,7 @@ uv run hibana serve inkling             # http://127.0.0.1:30007
 ```
 
 - **Download:** 20 GB
-- **Draft:** its bundled DSpark drafter
+- **Draft:** [incoai/Inkling-2-Mini-DFlash2](https://huggingface.co/incoai/Inkling-2-Mini-DFlash2), or its bundled DSpark drafter (`HIBANA_PROPOSER=dspark`)
 - **Checkpoint:** [thinkingmachines/Inkling-2-Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini)
 - **More:** [Inkling 2 Mini](docs/inkling.md)
 

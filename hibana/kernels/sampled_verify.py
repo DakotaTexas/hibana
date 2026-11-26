@@ -72,6 +72,7 @@ def _verify(values, index, drafts, q, support, row_params, rng, accepted_out, co
             tl.store(flags_out + row * K + j, tl.where((alive > 0) & ok & (exact == 0), 1, 0).to(tl.int64))
             reject = (alive > 0) & (ok == 0)
             residual = tl.maximum(law - q_at, 0.0)
+            residual = tl.where(tl.sum(residual, 0) > 0, residual, law)  # no residual mass (a rounding rejection): the target's law
             cdf = tl.cumsum(residual, 0)
             pick = tl.minimum(tl.sum(tl.where(in_c & (cdf <= u_last * tl.sum(residual, 0)), 1, 0), 0), C - 1)
             token = tl.sum(tl.where(c == pick, tokens, 0), 0)

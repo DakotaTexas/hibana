@@ -10,10 +10,12 @@ hibana chat inkling
 ```
 
 It serves text only (the checkpoint's vision tower is not loaded) and drafts with incoai's DFlash2 draft
-([DFlash2](#dflash2)), or with the checkpoint's bundled DSpark drafter (`HIBANA_PROPOSER=dspark`, [DSpark](#dspark)),
-verifying drafts exactly in every profile. `exact` serves the checkpoint's own weights; `fast` (the
-default) and `throughput` quantize the attention projections and the vocabulary head to FP8 at load and share
-experts within a budget ([expert sharing](#expert-sharing)), and `throughput` decodes up to 16 requests together.
+([DFlash2](#dflash2)), or with the checkpoint's bundled DSpark drafter (`HIBANA_PROPOSER=dspark`, [DSpark](#dspark)).
+`exact` serves the checkpoint's own weights and verifies every draft exactly; `fast` (the default) and `throughput`
+quantize the attention projections and the vocabulary head to FP8 at load, share experts within a budget ([expert
+sharing](#expert-sharing)) and accept sampled requests' drafts softly within a gate ([relaxed
+verification](#relaxed-verification)), still verifying greedy requests exactly; `throughput` decodes up to 16 requests
+together.
 Every profile keeps the SSD tier on, as the other targets do.
 
 ## The model
@@ -205,8 +207,9 @@ drawn from a law near the target's. One seed, so `fast` applies DSpark's s = 0.2
 `HIBANA_MOE_KEEP` / `HIBANA_MOE_BUDGET` ([operations](operations.md#serving-profiles)) apply to decode and verification
 calls with Nemotron's selection (`route_budget`): every row keeps its top F experts, its other top-8 experts ride
 along when the call's set holds them, and the set grows past the rows' floors by summed routing weight up to the cap.
-`fast` keeps 6 with 16 a request up to 64 a call; `throughput` keeps 4 with a cap of 20, which does better at 8-16
-streams. `exact` shares none. Closed-loop streams over the 18 h2h prompts (thinking off, greedy, `HIBANA_MAX_BATCH=16`),
+With DFlash2 (the default) `fast` and `throughput` keep 6 with 20 a request up to 80 a call ([DFlash2](#dflash2)); with
+DSpark `fast` keeps 6 with 16 a request up to 64 a call and `throughput` keeps 4 with a cap of 20, which does better at
+8-16 streams. `exact` shares none. Closed-loop streams over the 18 h2h prompts (thinking off, greedy, `HIBANA_MAX_BATCH=16`),
 all streams' tokens/s, off against keep 4 with a cap of 20:
 
 | | 1 | 2 | 4 | 8 | 16 streams |

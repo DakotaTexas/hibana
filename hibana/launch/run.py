@@ -137,7 +137,8 @@ def status(args) -> int:
         cfg, spec, stats = info.get("config") or {}, info.get("speculative") or {}, info.get("spec_stats") or {}
         print(f"{s.target}: serving on {s.url} from {how}, profile {cfg.get('profile')}, {info.get('tp_size', 1)} Spark(s), "
               f"context {info.get('context_length')}, up to {info.get('max_running_requests')} requests")
-        print(f"  draft {spec.get('draft') or 'the target MTP head'}, precision {spec.get('draft_precision')}")
+        own = "the checkpoint's bundled DSpark" if spec.get("algorithm") == "dspark" else "the target MTP head"
+        print(f"  draft {spec.get('draft') or own}, precision {spec.get('draft_precision')}")
         if stats.get("rounds"):
             print(f"  {stats['rounds']} speculative rounds: {stats['tokens_per_round']:.2f} tokens per round, {stats.get('round_ms', 0):.1f} ms each")
         traces = (info.get("scheduler") or {}).get("traces") or info.get("traces")

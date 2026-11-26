@@ -116,7 +116,8 @@ def profile_defaults(profile: str, target: str, flashnext_experts: str = "w3", t
         # DSpark's 62.2 / 107.5 / 156.4 / 246.2 and vLLM's 43.2 / 89.0 / 142.9 / 242.5 (its DSpark, 7 drafts; vLLM has no
         # DFlash2 for Inkling): DFlash2 drafts its block in one forward, so verifying all 7 costs only verify rows, where
         # each DSpark draft is one more drafter step (DSpark at 16 requests: 3 drafts 318.7 tok/s, 7 drafts 294.8).
-        # Every profile verifies drafts exactly. DSpark: a round verifies the first 3 of the 7: a verified row costs
+        # Greedy requests are verified exactly in every profile, sampled ones in `exact` (fast and throughput: s = 0.25
+        # gated 3:2.0, below). DSpark: a round verifies the first 3 of the 7: a verified row costs
         # its own experts, and drafts past the third are rarely reached; depth by acceptance up to 7
         # (HIBANA_SPEC_STEP_COST) was within noise of it. Past four requests plain decode wins. Served tok/s over the
         # 18 h2h prompts (thinking off, to 1,024 tokens), one request greedy / T 0.7 (median), then 2 / 4 closed-loop
@@ -160,7 +161,7 @@ def profile_defaults(profile: str, target: str, flashnext_experts: str = "w3", t
             # sampled with thinking on, 4 requests, exact acceptance): 79.8% against DSpark's 79.3% (p 0.85), answers 4%
             # shorter, 14 at the 16K cap against 18. h2h with drafts at every batch: 73.4 / 72.5, 96.7 / 128.5 / 176.9 /
             # 304.8 tok/s against DSpark's 72.1 / 67.0, 86.7 / 112.3 / 173.3 / 243.3 (one request greedy / T 0.7, then
-            # 2 / 4 / 8 / 16 streams). Soft acceptance is unmeasured with these drafts at s = 0.25.
+            # 2 / 4 / 8 / 16 streams). Soft acceptance's accuracy is unmeasured with these drafts (its speed is above).
             p.update(HIBANA_MOE_KEEP="6", HIBANA_MOE_BUDGET="20:80")
         if profile == "throughput":
             # a flat cap of 20 at keep 4 did better at 8-16 streams (exact: +31% / +33% against +5% / +25%)

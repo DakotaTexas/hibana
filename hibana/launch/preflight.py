@@ -157,6 +157,8 @@ def summary(s: Settings, host: dict[str, str], w3: Path | None, tp: int = 1) -> 
         draft = "none"
     elif s.proposer == "mtp":
         draft = "the model's own MTP head"
+    elif s.proposer == "dspark":
+        draft = "the checkpoint's bundled DSpark"
     elif s.draft_dir:
         draft = f"checkpoint {s.draft_dir}"
     elif s.parallel_draft:

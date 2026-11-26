@@ -80,7 +80,7 @@ def _sampling_from(body: dict, max_default: int = 512) -> SamplingParams:
     given = [k in body or k in sp for k in ("accept_top_k", "accept_margin")]
     if params.greedy and not any(given) and ACCEPT_DEFAULT != (1, 0.0):
         params.accept_top_k, params.accept_margin = ACCEPT_DEFAULT
-    elif not params.greedy and not all(given) and ACCEPT_SOFT_GATE != (1, 0.0):  # a gate is both fields or the server's
+    elif not params.greedy and not all(given):  # a sampled request's gate is both its fields or the server's (none: 1, 0)
         params.accept_top_k, params.accept_margin = ACCEPT_SOFT_GATE
     params.validate()
     return params

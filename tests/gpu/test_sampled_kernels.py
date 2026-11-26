@@ -83,6 +83,27 @@ def test_verify_candidates_is_distributed_as_verify_rows(relaxed, has_q, gate):
     assert not close(ref, Counter(zip(a.tolist(), c.tolist())))
 
 
+def test_a_rejection_with_no_residual_mass_draws_from_the_target_law():
+    """A draft law at or above the target's on every candidate leaves max(p - q, 0) empty: a rejection then draws from p
+    (as rejection.corrected_distribution does), never the candidate past the law's support."""
+    from hibana.kernels.sampled_verify import verify_candidates
+    p = torch.tensor([0.60, 0.30, 0.07, 0.03], device=DEV)
+    n = 20_000
+    values = torch.cat([p.log(), torch.tensor([-30.0], device=DEV)]).expand(n, 2, 5).contiguous()  # top_k 4 drops the fifth
+    index = torch.arange(5, device=DEV).expand(n, 2, 5).contiguous()
+    q = (p + 0.1).expand(n, 1, 4).contiguous()  # above p everywhere: no residual mass
+    support = torch.arange(4, device=DEV).expand(n, 1, 4).contiguous()
+    drafts = torch.multinomial(p, n, replacement=True).view(n, 1)
+    rows = torch.tensor([[1.0, 4, 1.0, 0, 0, 1.0, 0, 0]], device=DEV).expand(n, 8).contiguous()
+    rng = torch.stack([torch.arange(n, device=DEV) * 7919 + 3, torch.zeros(n, dtype=torch.int64, device=DEV)], 1)
+    a, c, _, fit = verify_candidates(values, index, drafts, rows, rng, q, support)
+    rejected = a == 0
+    assert bool(fit.all()) and int(rejected.sum()) > 1000
+    assert int(c[rejected].max()) < 4  # inside the law's support
+    got = torch.bincount(c[rejected], minlength=4).float() / int(rejected.sum())
+    assert (got - p).abs().max() < 0.03, got
+
+
 def test_verify_candidates_flags_ties_past_the_candidates():
     from hibana.kernels.sampled_verify import verify_candidates
     values, index = torch.zeros(1, 4, 300, device=DEV, dtype=torch.bfloat16).topk(30, dim=-1)
