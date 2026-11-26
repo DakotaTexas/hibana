@@ -9,9 +9,9 @@ hibana serve inkling
 hibana chat inkling
 ```
 
-It serves text only (the checkpoint's vision tower is not loaded) and drafts with the checkpoint's bundled DSpark
-drafter, or with incoai's DFlash2 draft (`HIBANA_PROPOSER=dflash2`, [DFlash2](#dflash2)), verifying drafts exactly in
-every profile. `exact` serves the checkpoint's own weights; `fast` (the
+It serves text only (the checkpoint's vision tower is not loaded) and drafts with incoai's DFlash2 draft
+([DFlash2](#dflash2)), or with the checkpoint's bundled DSpark drafter (`HIBANA_PROPOSER=dspark`, [DSpark](#dspark)),
+verifying drafts exactly in every profile. `exact` serves the checkpoint's own weights; `fast` (the
 default) and `throughput` quantize the attention projections and the vocabulary head to FP8 at load and share
 experts within a budget ([expert sharing](#expert-sharing)), and `throughput` decodes up to 16 requests together.
 Every profile keeps the SSD tier on, as the other targets do.
@@ -153,8 +153,8 @@ in `fast`.
 
 ## DFlash2
 
-`HIBANA_PROPOSER=dflash2` drafts with `incoai/Inkling-2-Mini-DFlash2` (pinned in `model/inkling/config.py`, downloaded
-by the launcher): the DFlash2 drafter the 27B and Flash-Next serve (`model/parallel_draft.py`,
+Inkling drafts with `incoai/Inkling-2-Mini-DFlash2` by default (pinned in `model/inkling/config.py`, downloaded by
+the launcher; `HIBANA_PROPOSER=dspark` serves the bundled DSpark instead): the DFlash2 drafter the 27B and Flash-Next serve (`model/parallel_draft.py`,
 `proposers/parallel.py`), five layers over a block of the pending token and seven mask rows, and a selector that
 walks the top 16 candidates of each position. Three things are Inkling's, as in the publisher's SGLang patch: its
 fourth tap (layer id 48) is the target's final norm, which the target computes anyway (`FeatureRequest.final_norm`);

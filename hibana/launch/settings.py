@@ -51,9 +51,10 @@ TARGET_SETTINGS = {
     "bolt": {"HIBANA_SERVICE": "hibana-bolt", "HIBANA_PORT": "30006", "HIBANA_PROPOSER": "dflash2",
              "HIBANA_DRAFT": "pinned", "HIBANA_DRAFT_PRECISION": "bf16", "HIBANA_VERIFY_STATE": "reconstruct",
              "HIBANA_VISION": "1", "recurrence": "mamba2", "w3_calibrated_only": True},
-    # its bundled DSpark drafter (a block of seven; the profile says how many a round verifies), text only. No layer
-    # is recurrent, so there is nothing to reconstruct: verification keeps each row's convolution windows (snapshots)
-    "inkling": {"HIBANA_SERVICE": "hibana-inkling", "HIBANA_PORT": "30007", "HIBANA_PROPOSER": "dspark", "HIBANA_SPEC": "7",
+    # incoai's DFlash2 draft (a block of seven; HIBANA_PROPOSER=dspark drafts with the checkpoint's bundled DSpark),
+    # text only. No layer is recurrent, so there is nothing to reconstruct: verification keeps each row's convolution
+    # windows (snapshots)
+    "inkling": {"HIBANA_SERVICE": "hibana-inkling", "HIBANA_PORT": "30007", "HIBANA_PROPOSER": "dflash2", "HIBANA_SPEC": "7",
                 "HIBANA_VERIFY_STATE": "snapshots"},
 }
 # The recurrent-state formats each recurrence stores (HIBANA_SSM_STATE, cache/ssm_format.py): the per-window integer
@@ -110,7 +111,12 @@ def profile_defaults(profile: str, target: str, flashnext_experts: str = "w3", t
     if target == "inkling":
         if profile not in PROFILE_NAMES:
             raise ValueError(f"unknown serving profile {profile!r} (choose from {', '.join(PROFILE_NAMES)})")
-        # Every profile verifies DSpark's drafts exactly. A round verifies the first 3 of the 7: a verified row costs
+        # DFlash2 drafts by default (below); with HIBANA_PROPOSER=dspark, the bundled DSpark. At temperature 1.0 on one
+        # Spark (18 h2h prompts, 1 / 4 / 8 / 16 requests, exact) DFlash2 decodes 69.2 / 126.7 / 191.8 / 303.4 tok/s against
+        # DSpark's 62.2 / 107.5 / 156.4 / 246.2 and vLLM's 43.2 / 89.0 / 142.9 / 242.5 (its DSpark, 7 drafts; vLLM has no
+        # DFlash2 for Inkling): DFlash2 drafts its block in one forward, so verifying all 7 costs only verify rows, where
+        # each DSpark draft is one more drafter step (DSpark at 16 requests: 3 drafts 318.7 tok/s, 7 drafts 294.8).
+        # Every profile verifies drafts exactly. DSpark: a round verifies the first 3 of the 7: a verified row costs
         # its own experts, and drafts past the third are rarely reached; depth by acceptance up to 7
         # (HIBANA_SPEC_STEP_COST) was within noise of it. Past four requests plain decode wins. Served tok/s over the
         # 18 h2h prompts (thinking off, to 1,024 tokens), one request greedy / T 0.7 (median), then 2 / 4 closed-loop

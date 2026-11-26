@@ -74,7 +74,7 @@ same) and results, traces, 3-bit checkpoints and logs in `HIBANA_RESULTS` (defau
 |---|---|---|
 | Target | the one named on `serve` (`27b`, `flashnext`, `nemotron`, `bolt` or `inkling`) | `HIBANA_TARGET`; Flash-Next reads its model from `HIBANA_FLASHNEXT_CACHE` and takes `HIBANA_FLASHNEXT_TRUNK=fp8\|bf16`; Inkling takes `HIBANA_INKLING_TRUNK=bf16\|fp8` ([Inkling](inkling.md#arithmetic)) |
 | Serving profile | `fast` | `hibana serve --exact\|--fast\|--throughput` or `HIBANA_PROFILE` ([below](#serving-profiles)) |
-| Proposer / draft proposals | 27B: DFlash2, 15 (16 verify rows); Flash-Next: MTP, 4 (`fast`: up to 8, adaptive, below), or with `HIBANA_PROPOSER=dflash2` (one Spark) DFlash2, 9 (`exact`: 7, `throughput`: 4) | `HIBANA_PROPOSER`, `HIBANA_SPEC` (0 = plain decode; with adaptive depth, the cap) |
+| Proposer / draft proposals | 27B: DFlash2, 15 (16 verify rows); Flash-Next: MTP, 4 (`fast`: up to 8, adaptive, below), or with `HIBANA_PROPOSER=dflash2` (one Spark) DFlash2, 9 (`exact`: 7, `throughput`: 4); Inkling: DFlash2, 7 (`HIBANA_PROPOSER=dspark`: its bundled DSpark, 7, of which 3 are verified) | `HIBANA_PROPOSER`, `HIBANA_SPEC` (0 = plain decode; with adaptive depth, the cap) |
 | Draft precision | 27B: FP8; Flash-Next: BF16 (MTP), FP8 (DFlash2) | `HIBANA_DRAFT_PRECISION=bf16` for the 27B publisher's precision |
 | Draft checkpoint | the publisher's pinned draft | `hibana serve --draft DIR` or `HIBANA_DRAFT=/dir`: a DFlash2 checkpoint of the same architecture, trained on the served target's features |
 | Accepted state | reconstruction | `HIBANA_VERIFY_STATE` |

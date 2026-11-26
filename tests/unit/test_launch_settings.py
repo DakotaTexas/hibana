@@ -92,6 +92,14 @@ def test_sampled_requests_get_one_bounded_rule(profile, target, proposer, soft):
     assert p["HIBANA_ACCEPT_SOFT"] == soft and not any("SAMPLED" in k for k in p)
 
 
+def test_inkling_drafts_with_dflash2_unless_told_dspark(env):
+    s = resolve(env, "inkling")
+    assert s.proposer == "dflash2" and s.get("HIBANA_DRAFT") == "pinned"
+    assert s.get("HIBANA_SPEC") == "7" and s.get("HIBANA_SPEC_DEPTHS") == "1:7,2:7,4:7"
+    d = resolve({**env, "HIBANA_PROPOSER": "dspark"}, "inkling")
+    assert d.proposer == "dspark" and d.get("HIBANA_SPEC_DEPTHS") == "1:3,2:3,4:3" and "--draft" not in d.engine_args()
+
+
 @pytest.mark.parametrize("value", ["inf", "nan", "-0.5", "x"])
 def test_accept_soft_must_be_finite_and_nonnegative(env, value):
     with pytest.raises(ValueError, match="HIBANA_ACCEPT_SOFT"):
