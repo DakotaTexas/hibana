@@ -9,6 +9,7 @@ import pytest
 
 from hibana import cli
 from hibana.launch import ctl, preflight, run, service
+from hibana.launch.settings import target_name
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -139,7 +140,7 @@ def test_serve_needs_a_named_model(home, monkeypatch):
     started = []
     monkeypatch.setattr(run.guard, "start_thread", lambda **kw: None)
     monkeypatch.setattr(cli, "run_engine", lambda args, parser: started.append(os.environ["HIBANA_TARGET"]) or 0)
-    with pytest.raises(SystemExit, match="name a model: 27b, flashnext, nemotron or bolt"):
+    with pytest.raises(SystemExit, match="name a model: 27b, flashnext, nemotron, bolt or inkling"):
         cli.main(["serve"])
     assert started == []
     (home / "none.env").write_text("HIBANA_TARGET=bolt\n")
@@ -149,10 +150,10 @@ def test_serve_needs_a_named_model(home, monkeypatch):
 
 
 def test_nothing_serving_names_every_target(home, capsys):
-    with pytest.raises(SystemExit, match="hibana serve 27b, flashnext, nemotron or bolt first"):
+    with pytest.raises(SystemExit, match="hibana serve 27b, flashnext, nemotron, bolt or inkling first"):
         cli.main(["chat"])
     assert run.status(cli.build_parser().parse_args(["status"])) == 0
-    assert "hibana serve 27b, flashnext, nemotron or bolt" in capsys.readouterr().out
+    assert "hibana serve 27b, flashnext, nemotron, bolt or inkling" in capsys.readouterr().out
 
 
 def test_serve_refuses_a_busy_port_and_bad_settings(home, monkeypatch):
@@ -197,7 +198,7 @@ def test_service_start_composes_systemd_run(home, monkeypatch, tmp_path):
 def test_stop_status_and_logs_follow_what_is_serving(home, monkeypatch, capsys):
     stopped = []
     monkeypatch.setattr(service, "stop", lambda unit: stopped.append(unit) or unit == "hibana-flashnext")
-    assert cli.main(["stop"]) == 0 and stopped == ["hibana-qwen38", "hibana-flashnext", "hibana-nemotron", "hibana-bolt"]
+    assert cli.main(["stop"]) == 0 and stopped == ["hibana-qwen38", "hibana-flashnext", "hibana-nemotron", "hibana-bolt", "hibana-inkling"]
     assert "stopped hibana-flashnext" in capsys.readouterr().out
     monkeypatch.setattr(ctl, "server_info", lambda port: {"config": {"profile": "fast"}, "tp_size": 1, "context_length": 262144,
                                                            "max_running_requests": 4} if port == "30004" else None)
@@ -244,6 +245,9 @@ def test_launch_sets_up_each_agent_for_the_serving_target(home, monkeypatch, tmp
     assert env["ANTHROPIC_MODEL"] == "claude-hibana-qwen3.8-27b"  # contains "claude" and names the serving model
     cli.main(["launch", "--target", "nemotron", "claude"])
     assert launched[-1][1]["ANTHROPIC_MODEL"] == "claude-hibana-nemotron-3.5-super"
+    cli.main(["launch", "--target", "inkling", "claude"])
+    assert launched[-1][1]["ANTHROPIC_MODEL"] == "claude-hibana-inkling-2-mini"
+    assert {target_name(t) for t in run.SERVED} == set(ctl.ALIASES)  # every served target has a model name for the agents
     cli.main(["launch", "--target", "flashnext", "opencode"])
     command, env = launched[-1]
     config = json.loads(Path(env["OPENCODE_CONFIG"]).read_text())

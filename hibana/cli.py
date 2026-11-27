@@ -4,6 +4,7 @@
     hibana serve flashnext --detach  # Qwen3.8-Flash-Next on :30004 as a background service (hibana stop, hibana logs -f)
     hibana serve nemotron            # Nemotron-3.5-Super (120B-A12B, NVFP4) on :30005, one Spark
     hibana serve bolt                # Nemotron-3.5-Bolt (74B-A9B, packed) on :30006, one Spark
+    hibana serve inkling             # Inkling-2-Mini (26B-A3.4B, looped) on :30007, one Spark
     hibana serve 27b --tp 2          # tensor-parallel on two DGX Sparks
     hibana chat                      # chat with whichever target is serving
     hibana launch claude             # Claude Code (or opencode, aider) set up for the serving target
@@ -34,9 +35,9 @@ def add_engine_args(p: argparse.ArgumentParser) -> None:
     """`hibana engine`: the server itself, with every setting explicit (what `hibana serve` and the ranks run)."""
     p.add_argument("--target", default=None, help="pinned serving target (default: HIBANA_TARGET, else qwen38)")
     p.add_argument("--host", default=None, help="default: 127.0.0.1")
-    p.add_argument("--port", type=int, default=None, help="default: the target's, as `hibana serve` (27B 30001, Flash-Next 30004, Nemotron 30005, Bolt 30006)")
-    p.add_argument("--proposer", choices=("mtp", "dflash2"), default=None, help="default: the target's (27B and Bolt dflash2; Flash-Next and Super mtp)")
-    p.add_argument("--verify-state", choices=("snapshots", "reconstruct"), default=None, help="default: reconstruct")
+    p.add_argument("--port", type=int, default=None, help="default: the target's, as `hibana serve` (27B 30001, Flash-Next 30004, Nemotron 30005, Bolt 30006, Inkling 30007)")
+    p.add_argument("--proposer", choices=("mtp", "dflash2", "dspark"), default=None, help="default: the target's (27B, Bolt and Inkling dflash2; Flash-Next and Super mtp)")
+    p.add_argument("--verify-state", choices=("snapshots", "reconstruct"), default=None, help="default: the target's (Inkling snapshots, else reconstruct)")
     p.add_argument("--draft-precision", choices=("bf16", "fp8"), default=None, help="parallel draft matrix precision (default: the target's)")
     p.add_argument("--spec", type=int, default=None, help="draft tokens per round (0 = off; default: HIBANA_SPEC, else the proposer's validated depth)")
     p.add_argument("--draft", default=None, help="DFlash2/LiLiCorr checkpoint directory to serve instead of the pinned draft (default: HIBANA_DRAFT)")
@@ -47,6 +48,9 @@ def add_engine_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--spec-depths", default=None, help="verify depth per batch bucket as BUCKET:DEPTH pairs, e.g. 8:1,16:0 (0: plain decode; default: HIBANA_SPEC_DEPTHS, else --spec everywhere)")
     p.add_argument("--accept-default", default=None, help="relaxed acceptance for greedy requests without accept_top_k/accept_margin, as K:M "
                    "(default: HIBANA_ACCEPT_DEFAULT, else the profile's); 'off' keeps every request exact")
+    p.add_argument("--accept-soft-gate", default=None, help="the gate on --accept-soft for sampled requests without accept_top_k/accept_margin, "
+                   "as K:M: only a draft the target ranks within its top K and within M nats of its top token gets e^s "
+                   "(default: HIBANA_ACCEPT_SOFT_GATE, else off: every draft)")
     p.add_argument("--accept-soft", type=float, default=None, help="relaxed acceptance for sampled requests without accept_soft, as s: no token comes out more than "
                    "e^s times as often as the target gives it (default: HIBANA_ACCEPT_SOFT, else 0, exact)")
     p.add_argument("--tp", type=int, default=1, help="tensor-parallel ranks, one GPU (Spark) each; rank 0 serves HTTP")
@@ -110,16 +114,17 @@ def run_engine(args, parser) -> int:
     max_mib = args.traces_max_mib if args.traces_max_mib is not None else cfg.traces_max_mib
     if max_mib < 1:
         parser.error("--traces-max-mib must be a positive integer")
-    from hibana.api.validation import parse_accept_default
+    from hibana.api.validation import parse_accept_default, parse_soft_gate
     try:
         accept_default = parse_accept_default(args.accept_default if args.accept_default is not None else cfg.accept_default)
+        soft_gate = parse_soft_gate(args.accept_soft_gate if args.accept_soft_gate is not None else cfg.accept_soft_gate)
     except ValueError as exc:
         parser.error(str(exc))
     accept_soft = args.accept_soft if args.accept_soft is not None else cfg.accept_soft
     if not math.isfinite(accept_soft) or accept_soft < 0:
         parser.error("--accept-soft must be a finite number >= 0")
     if not args.spec:
-        accept_default, accept_soft = (1, 0.0), 0.0  # no speculation, nothing to relax
+        accept_default, accept_soft, soft_gate = (1, 0.0), 0.0, (1, 0.0)  # no speculation, nothing to relax
     max_context = args.context_length if args.context_length is not None else cfg.max_context
     from hibana.engine.profile import MAX_CONTEXT
     if max_context is not None and not 2 <= max_context <= MAX_CONTEXT:
@@ -141,15 +146,15 @@ def run_engine(args, parser) -> int:
         if family == "flashnext" and args.spec and args.proposer == "dflash2":
             parser.error("Flash-Next serves DFlash2 on one Spark: serve MTP tensor-parallel")
     # One configuration for the process: the environment with the command line applied.
-    engine_config.install(cfg.replace(spec=str(args.spec), traces=traces, traces_max_mib=max_mib, draft_dir=draft_dir,
+    engine_config.install(cfg.replace(spec=str(args.spec), proposer=args.proposer, traces=traces, traces_max_mib=max_mib, draft_dir=draft_dir,
                                       target=target, max_context=max_context, accept_default=f"{accept_default[0]}:{accept_default[1]}",
                                       max_batch=max_batch, spec_depths=spec_depths if args.spec else None,
-                                      accept_soft=accept_soft))
+                                      accept_soft=accept_soft, accept_soft_gate=f"{soft_gate[0]}:{soft_gate[1]}"))
     from hibana.api.server import serve
     serve(args.host, args.port, spec=args.spec, proposer=args.proposer, state_strategy=args.verify_state,
           draft_precision=args.draft_precision, traces=traces, traces_max_mib=max_mib, draft_dir=draft_dir,
           accept_default=accept_default, target=target,
-          max_context=max_context, max_batch=max_batch, accept_soft=accept_soft)
+          max_context=max_context, max_batch=max_batch, accept_soft=accept_soft, accept_soft_gate=soft_gate)
     if args.tp > 1:
         close_distributed()
     return 0
@@ -161,7 +166,7 @@ def engine_parser() -> argparse.ArgumentParser:
     return p
 
 
-def add_target(p: argparse.ArgumentParser, help: str = "27b, flashnext, nemotron (Super) or bolt (Nemotron Bolt)") -> None:
+def add_target(p: argparse.ArgumentParser, help: str = "27b, flashnext, nemotron (Super), bolt (Nemotron Bolt) or inkling (Inkling-2-Mini)") -> None:
     p.add_argument("target", nargs="?", choices=TARGET_CHOICES, metavar="TARGET", help=help)
 
 
@@ -170,19 +175,19 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
 
     p = sub.add_parser("serve", help="serve a model (in the foreground; --detach for a background service)")
-    add_target(p, "27b, flashnext, nemotron (Super) or bolt (Nemotron Bolt); default: HIBANA_TARGET")
+    add_target(p, "27b, flashnext, nemotron (Super), bolt (Nemotron Bolt) or inkling (Inkling-2-Mini); default: HIBANA_TARGET")
     g = p.add_mutually_exclusive_group()
     for name in PROFILE_NAMES:
         g.add_argument(f"--{name}", dest="profile", action="store_const", const=name, help=PROFILE_HELP[name])
     p.add_argument("-d", "--detach", action="store_true", help="run as a user systemd service (hibana stop | status | logs)")
     p.add_argument("--tp", type=int, choices=(1, 2), default=1, help="2: tensor-parallel on two DGX Sparks (docs/tensor-parallel.md)")
-    p.add_argument("--port", type=int, default=None, help="default: 30001 for the 27B, 30004 for Flash-Next, 30005 for Nemotron Super, 30006 for Bolt")
+    p.add_argument("--port", type=int, default=None, help="default: 30001 for the 27B, 30004 for Flash-Next, 30005 for Nemotron Super, 30006 for Bolt, 30007 for Inkling")
     p.add_argument("--host", default=None, help="default: 127.0.0.1")
     p.add_argument("--context-length", type=int, default=None, help="largest prompt plus output per request (default 262144)")
     p.add_argument("--max-batch", type=int, default=None, help="most requests decoded together, 1-128 (default: the profile's)")
     p.add_argument("--traces", action="store_true", help="record each request's token IDs and speculative rounds (HIBANA_TRACES, else $HIBANA_RESULTS/traces)")
     p.add_argument("--draft", default=None, help="serve this DFlash2/LiLiCorr checkpoint directory instead of the publisher's draft")
-    p.add_argument("--proposer", choices=("mtp", "dflash2"), default=None, help=argparse.SUPPRESS)
+    p.add_argument("--proposer", choices=("mtp", "dflash2", "dspark"), default=None, help=argparse.SUPPRESS)
     p.add_argument("--spec", type=int, default=None, help=argparse.SUPPRESS)
     p.add_argument("--draft-precision", choices=("bf16", "fp8"), default=None, help=argparse.SUPPRESS)
     p.add_argument("--spec-depths", default=None, help=argparse.SUPPRESS)

@@ -72,6 +72,18 @@ def _cast(value: str, schema: dict | None):
     return value
 
 
+def _json_call(body: str) -> dict | None:
+    try:
+        call = json.loads(body)
+        name, args = call["name"], call.get("arguments", {})
+    except (ValueError, KeyError, TypeError):
+        return None
+    if not isinstance(name, str) or not isinstance(args, dict):
+        return None
+    return {"id": f"call_{uuid.uuid4().hex[:24]}", "type": "function",
+            "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)}}
+
+
 def parse_tool_calls(text: str, tools: list[dict] | None) -> tuple[str, list[dict]]:
     """Returns (content_before_calls, openai_tool_calls)."""
     if not has_tool_call(text):
@@ -85,6 +97,9 @@ def parse_tool_calls(text: str, tools: list[dict] | None) -> tuple[str, list[dic
     for block in BLOCK.finditer(text):
         m = FUNC.search(block.group(1))
         if not m:
+            call = _json_call(block.group(1))  # a {"name", "arguments"} block (parsers/inkling.py writes them)
+            if call is not None:
+                calls.append(call)
             continue
         name = m.group(1).strip()
         args = {}

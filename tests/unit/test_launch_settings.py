@@ -92,10 +92,35 @@ def test_sampled_requests_get_one_bounded_rule(profile, target, proposer, soft):
     assert p["HIBANA_ACCEPT_SOFT"] == soft and not any("SAMPLED" in k for k in p)
 
 
+def test_inkling_drafts_with_dflash2_unless_told_dspark(env):
+    s = resolve(env, "inkling")
+    assert s.proposer == "dflash2" and s.get("HIBANA_DRAFT") == "pinned"
+    assert (s.get("HIBANA_ACCEPT_SOFT"), s.get("HIBANA_ACCEPT_SOFT_GATE")) == ("0.25", "3:2.0")
+    assert s.engine_args()[s.engine_args().index("--accept-soft-gate") + 1] == "3:2.0"
+    e = resolve(env, "inkling", "exact")
+    assert "HIBANA_ACCEPT_SOFT_GATE" not in e.values and e.get("HIBANA_ACCEPT_DEFAULT") == "off"
+    assert s.get("HIBANA_SPEC") == "7" and s.get("HIBANA_SPEC_DEPTHS") == "1:7,2:7,4:7"
+    d = resolve({**env, "HIBANA_PROPOSER": "dspark"}, "inkling")
+    assert d.proposer == "dspark" and d.get("HIBANA_SPEC_DEPTHS") == "1:3,2:3,4:3" and "--draft" not in d.engine_args()
+    for p in ("dflash2", "dspark"):
+        for profile in ("fast", "throughput"):
+            r = resolve({**env, "HIBANA_PROPOSER": p}, "inkling", profile)
+            assert (r.get("HIBANA_MOE_KEEP"), r.get("HIBANA_MOE_BUDGET")) == ("4", "12:48")
+            assert r.engine_args()[r.engine_args().index("--accept-default") + 1] == "2:0.5"
+    t = resolve({**env, "HIBANA_PROPOSER": "dspark"}, "inkling", "throughput")
+    assert t.get("HIBANA_SPEC_DEPTHS") == "1:3,2:3,4:3,8:3,16:3"
+
+
 @pytest.mark.parametrize("value", ["inf", "nan", "-0.5", "x"])
 def test_accept_soft_must_be_finite_and_nonnegative(env, value):
     with pytest.raises(ValueError, match="HIBANA_ACCEPT_SOFT"):
         resolve({**env, "HIBANA_ACCEPT_SOFT": value}, "27b", "fast")
+
+
+@pytest.mark.parametrize("value", ["3", "0:2.0", "3:-1", "3:inf", "a:b"])
+def test_accept_soft_gate_must_be_k_m_or_off(env, value):
+    with pytest.raises(ValueError, match="HIBANA_ACCEPT_SOFT_GATE"):
+        resolve({**env, "HIBANA_ACCEPT_SOFT_GATE": value}, "27b", "fast")
 
 
 @pytest.mark.parametrize("profile, target, w3", [
@@ -199,7 +224,9 @@ def test_the_engine_gets_explicit_flags_and_its_environment(env, tmp_path):
     assert "--draft" not in args and args[args.index("--traces") + 1] == str(s.traces)
     assert not any("sampled" in a for a in args)
     soft = resolve({**env, "HIBANA_DRAFT": "pinned", "HIBANA_ACCEPT_SOFT": "0.25"}, "27b", "fast").engine_args()
-    assert soft[soft.index("--accept-soft") + 1] == "0.25"
+    assert soft[soft.index("--accept-soft") + 1] == "0.25" and "--accept-soft-gate" not in soft
+    gated = resolve({**env, "HIBANA_DRAFT": "pinned", "HIBANA_ACCEPT_SOFT": "0.5", "HIBANA_ACCEPT_SOFT_GATE": "3:2.0"}, "27b", "fast").engine_args()
+    assert gated[gated.index("--accept-soft-gate") + 1] == "3:2.0"
     e = s.engine_env(tmp_path / "w3")
     assert e["HIBANA_W3_CHECKPOINT"] == str(tmp_path / "w3") and e["HIBANA_SSD_DIR"] == str(s.ssd)
     assert "HIBANA_DRAFT" not in e and "HIBANA_TRACES" not in e  # the flags carry them

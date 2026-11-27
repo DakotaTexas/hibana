@@ -106,6 +106,12 @@ class Target:
     first_text_token: int = 0
     # Restrict cache formats when a target's attention implements only a subset (None: the shared pool's formats).
     kv_formats: tuple[str, ...] | None = None
+    # Bytes of per-slot state the model registers beyond the recurrent layers' (`StatePool.register_aux`), where
+    # the memory plan must count them (Inkling's convolution windows are all of its slot).
+    slot_state_bytes: int = 0
+    # How the chat API frames a conversation: "qwen" (<think> and <tool_call> text tags) or "inkling" (message and
+    # content tokens; api/parsers/inkling.py).
+    chat_format: str = "qwen"
 
     def __post_init__(self):
         if len(self.layer_types) != self.num_layers or any(t not in ("full_attention", "linear_attention", "moe") for t in self.layer_types):
@@ -170,7 +176,7 @@ class Target:
 
     @property
     def state_bytes_per_slot(self) -> int:
-        return self.state_bytes_per_layer * len(self.gdn_layer_ids)
+        return self.state_bytes_per_layer * len(self.gdn_layer_ids) + self.slot_state_bytes
 
     # ---- snapshot and host validation ----
     def draft_pin(self, proposer: str) -> tuple[str, str]:
@@ -204,6 +210,9 @@ class Target:
             return check_config(self, snap)
         if self.family == "nemotron":
             from hibana.model.nemotron.config import check_config
+            return check_config(self, snap)
+        if self.family == "inkling":
+            from hibana.model.inkling.config import check_config
             return check_config(self, snap)
         cfg = json.loads((snap / "config.json").read_text())
         text = cfg["text_config"]
@@ -239,7 +248,7 @@ class Target:
         return cfg
 
     def layer_types_of(self, cfg: dict) -> list[str]:
-        if self.family == "nemotron":  # `check_config` matched the block pattern
+        if self.family in ("nemotron", "inkling"):  # `check_config` matched the block pattern
             return list(self.layer_types)
         types = cfg["text_config"]["layer_types"]
         if tuple(types) != self.layer_types:
@@ -383,7 +392,34 @@ def _bolt() -> Target:
 
 
 NEMOTRON_BOLT = _bolt()
-TARGETS: dict[str, Target] = {t.name: t for t in (QWEN38, FLASHNEXT, NEMOTRON, NEMOTRON_BOLT)}
+
+
+def _inkling() -> Target:
+    from hibana.model.inkling import config as c
+    # The target's layers are the 48 layer visits a token makes (model/inkling/config.py): each keeps its own K/V, so
+    # all are attention layers of one geometry. No recurrent layers: the visits' convolution windows are per-slot state
+    # the model registers. No rotary dims (a learned relative-position bias).
+    return Target(
+        name="inkling", family="inkling",
+        model_id=c.MODEL_ID, model_revision=c.MODEL_REVISION, model_cache_key=c.MODEL_CACHE_KEY,
+        architecture=c.MODEL_ARCHITECTURE, hidden_size=c.HIDDEN_SIZE, intermediate_size=None,
+        num_layers=c.NUM_VISITS, layer_types=("full_attention",) * c.NUM_VISITS,
+        num_attention_heads=c.NUM_ATTENTION_HEADS, num_kv_heads=c.NUM_KV_HEADS, head_dim=c.HEAD_DIM,
+        partial_rotary_factor=0.0, rope_theta=0.0,
+        linear_num_key_heads=0, linear_num_value_heads=0, linear_key_head_dim=0, linear_value_head_dim=0,
+        linear_conv_kernel=c.CONV_KERNEL, vocab_size=c.VOCAB_SIZE, rms_norm_eps=c.RMS_NORM_EPS,
+        max_position_embeddings=c.MAX_POSITION_EMBEDDINGS, nvfp4_group_size=c.NVFP4_GROUP_SIZE,
+        weight_load_peak_bytes=c.WEIGHT_LOAD_PEAK_BYTES, prefill_chunk=c.PREFILL_CHUNK,
+        num_experts=c.NUM_EXPERTS, experts_per_token=c.EXPERTS_PER_TOKEN, moe_intermediate_size=c.MOE_INTERMEDIATE_SIZE,
+        routed_scaling_factor=c.ROUTE_SCALE, stop_token_ids=c.STOP_TOKEN_IDS,
+        kv_formats=("fp8", "sim-bf16"),  # sim-bf16: the checkpoint's own unquantized cache
+        slot_state_bytes=c.CONV_STATE_BYTES, chat_format="inkling",
+        draft_pins=tuple((name, *pin) for name, pin in c.DRAFT_PINS.items()),
+    )
+
+
+INKLING = _inkling()
+TARGETS: dict[str, Target] = {t.name: t for t in (QWEN38, FLASHNEXT, NEMOTRON, NEMOTRON_BOLT, INKLING)}
 DEFAULT_TARGET = QWEN38
 
 
@@ -410,4 +446,7 @@ def load_model(target: Target, snap: Path, **kwargs):
     if target.family == "nemotron":
         from hibana.model.nemotron.model import Nemotron
         return Nemotron(snap, target=target, **kwargs)
+    if target.family == "inkling":
+        from hibana.model.inkling.model import Inkling
+        return Inkling(snap, target=target, **kwargs)
     raise ValueError(f"no loader for target {target.name!r}")

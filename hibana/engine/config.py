@@ -103,12 +103,14 @@ class EngineConfig:
     ssm_compensators: int | None = None       # HIBANA_SSM_COMPENSATORS: FP16 rank-one outlier terms kept beside the quantized state (0-16; unset: 4, or 8 for int4)
     flashnext_trunk: str = "fp8"              # HIBANA_FLASHNEXT_TRUNK: bf16 | fp8
     trunk_keep_bf16: str | None = None        # HIBANA_TRUNK_KEEP_BF16: regex of Flash-Next projections kept BF16
+    inkling_trunk: str = "bf16"               # HIBANA_INKLING_TRUNK: bf16 (the checkpoint's) | fp8 (attention projections and head at load)
     flashnext_experts: str = "w3"             # HIBANA_FLASHNEXT_EXPERTS: w3 (the W3 checkpoint's 3-bit routed experts when it carries them) | nvfp4
     bolt_experts: str = "b12x"                # HIBANA_BOLT_EXPERTS: b12x fused MoE (BF16 activations) | fp8 grouped native IQ2 | bf16 Triton weight-only
     vision: bool = False                      # HIBANA_VISION: load the checkpoint's vision encoder for image input
     vision_max_pixels: int = 16_777_216       # HIBANA_VISION_MAX_PIXELS: the Qwen targets' resize cap per image (16,384 tokens)
     # --- speculation
     spec: str | None = None                   # HIBANA_SPEC as given ("auto"/unset: the proposer's default depth)
+    proposer: str | None = None               # HIBANA_PROPOSER: mtp | dflash2 | dspark (serve: the target's default)
     spec_depths: str | None = None            # HIBANA_SPEC_DEPTHS: verify depth per batch bucket, "8:1,16:0" (0: plain decode; unset: HIBANA_SPEC everywhere)
     spec_step_cost: float = 0.0               # HIBANA_SPEC_STEP_COST: a drafted token's cost against a depth-1 round, for adaptive depth (engine/depth.py; 0: fixed)
     spec_policy: str = "fixed"                # HIBANA_SPEC_POLICY: fixed | budget (engine/depth.RowBudget: verified drafts from scores and measured costs)
@@ -121,6 +123,7 @@ class EngineConfig:
     mtp_sample: bool = False                  # HIBANA_MTP_SAMPLE: sampled requests draft from the MTP head's law on its rescored candidates instead of its argmax, verified against that law
     accept_default: str = "off"               # HIBANA_ACCEPT_DEFAULT: K:M for greedy requests that set neither field (off: exact)
     accept_soft: float = 0.0                  # HIBANA_ACCEPT_SOFT: accept_soft s for sampled requests that do not set it (0: exact)
+    accept_soft_gate: str = "off"             # HIBANA_ACCEPT_SOFT_GATE: K:M gate on sampled accept_soft
     qsa_sparse_graphs: bool = True            # HIBANA_QSA_SPARSE_GRAPHS=0: rows past the indexer budget run eagerly
     qsa_prefill_backend: str = "original"    # HIBANA_QSA_PREFILL_BACKEND: original, auto, optimized (SM121 TP1/TP2, <=32K)
     ple_resident: str = "auto"                 # HIBANA_PLE_RESIDENT: Flash-Next's PLE table in device memory, each tensor-parallel rank its share of the heads; auto: on two Sparks, 0: off
@@ -192,11 +195,13 @@ class EngineConfig:
             ssm_compensators=_int(e, "HIBANA_SSM_COMPENSATORS", None),
             flashnext_trunk=_str(e, "HIBANA_FLASHNEXT_TRUNK", "fp8"),
             trunk_keep_bf16=_str(e, "HIBANA_TRUNK_KEEP_BF16"),
+            inkling_trunk=_str(e, "HIBANA_INKLING_TRUNK", "bf16"),
             flashnext_experts=_str(e, "HIBANA_FLASHNEXT_EXPERTS", "w3"),
             bolt_experts=_str(e, "HIBANA_BOLT_EXPERTS", "b12x"),
             vision=_flag(e, "HIBANA_VISION"),
             vision_max_pixels=_positive(e, "HIBANA_VISION_MAX_PIXELS", 16_777_216),
             spec=_str(e, "HIBANA_SPEC"),
+            proposer=_str(e, "HIBANA_PROPOSER"),
             spec_depths=_str(e, "HIBANA_SPEC_DEPTHS"),
             spec_step_cost=float(_str(e, "HIBANA_SPEC_STEP_COST") or 0.0),
             spec_policy=_str(e, "HIBANA_SPEC_POLICY", "fixed"),
@@ -209,6 +214,7 @@ class EngineConfig:
             mtp_sample=_flag(e, "HIBANA_MTP_SAMPLE"),
             accept_default=e.get("HIBANA_ACCEPT_DEFAULT", "off"),
             accept_soft=_accept_soft(e),
+            accept_soft_gate=e.get("HIBANA_ACCEPT_SOFT_GATE", "off"),
             qsa_sparse_graphs=e.get("HIBANA_QSA_SPARSE_GRAPHS", "1") != "0",
             qsa_prefill_backend=_str(e, "HIBANA_QSA_PREFILL_BACKEND", "original"),
             ple_resident=e.get("HIBANA_PLE_RESIDENT", "auto"),

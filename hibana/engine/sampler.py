@@ -1,7 +1,8 @@
 """Token sampling: greedy fast path, then temperature / top-k / top-p.
 
-Defaults mirror the checkpoint's generation_config (temperature 1.0, top_k 20,
-top_p 0.95) when a request does not set them; temperature 0 means greedy.
+Defaults when a request does not set them: top_k 20 and top_p 0.95 (Hibana's, not
+every checkpoint's generation_config: the fused sampled verify needs a top_k), and
+temperature 1.0 on the chat APIs, 0 (greedy) elsewhere. temperature 0 means greedy.
 """
 
 from __future__ import annotations
@@ -30,9 +31,12 @@ class SamplingParams:
     # Relaxed speculative acceptance, one rule per kind of request; outputs then are neither the exact greedy
     # continuation nor exact samples of the target distribution. Greedy requests: a drafted token is also accepted
     # when the target ranks it within its top accept_top_k and within accept_margin of its argmax in logits (off
-    # unless both are set). Sampled requests ignore those two: a drafted token y is also accepted when
-    # u * q(y) < e^accept_soft * p(y) (u the exact test's uniform, q the draft's law, p the request's), so no token
-    # comes out more than e^accept_soft times as often as the target's law gives it, per token; 0 is exact.
+    # unless both are set). Sampled requests: a drafted token y is also accepted when u * q(y) < e^accept_soft * p(y)
+    # (u the exact test's uniform, q the draft's law, p the request's), so no token comes out more than e^accept_soft
+    # times as often as the target's law gives it, per token; 0 is exact. For a sampled request accept_top_k and
+    # accept_margin are a gate on that test unless they keep their defaults (1, 0.0): only a draft the law ranks within
+    # its top accept_top_k and within accept_margin nats of its top token gets e^accept_soft; one outside takes the
+    # exact test, so it never comes out more often than the target gives it.
     accept_top_k: int = 1
     accept_margin: float = 0.0
     accept_soft: float = 0.0
@@ -77,6 +81,14 @@ class SamplingParams:
     def relaxed(self) -> bool:
         """Is this request's relaxed rule on: K:M for a greedy request, accept_soft for a sampled one."""
         return self.accept_top_k > 1 and self.accept_margin > 0 if self.greedy else self.accept_soft > 0
+
+    @property
+    def soft_gate(self) -> tuple[int, float] | None:
+        """A relaxed sampled request's gate (accept_top_k, accept_margin) on the e^accept_soft test, or None: every
+        draft gets it (the defaults (1, 0.0))."""
+        if self.greedy or self.accept_soft <= 0 or (self.accept_top_k, self.accept_margin) == (1, 0.0):
+            return None
+        return self.accept_top_k, float(self.accept_margin)
 
     @property
     def soft_scale(self) -> float:

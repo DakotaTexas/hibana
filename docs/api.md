@@ -27,7 +27,7 @@ speculative scratch capacity.
 | `messages` | Nonempty conversation rendered with the pinned snapshot template; `image_url` parts on a target serving images ([images](#images)). Earlier assistant turns' `reasoning_content` is rendered on every target (Nemotron's template variable `truncate_history_thinking` defaults to false here; `chat_template_kwargs` can set it), so a new user turn appends to the cached prompt instead of changing it |
 | `stream` | Server-sent events ending with `[DONE]` |
 | `max_tokens` / `max_completion_tokens` | Requested output budget |
-| `temperature`, `top_p`, `top_k`, `seed` | Validated sampling parameters. An omitted `temperature` is OpenAI's 1.0 (with top_p 0.95 and top_k 20, the models' own generation config); send `temperature: 0` for greedy. OpenCode sends no sampling fields, and greedy thinking looped until `max_tokens` in its runs. `/v1/completions` and `/generate` keep greedy as their default |
+| `temperature`, `top_p`, `top_k`, `seed` | Validated sampling parameters. An omitted `temperature` is OpenAI's 1.0 (with Hibana's defaults top_p 0.95 and top_k 20, kept because the fused sampled verify needs a top_k; not every model's generation config sets them); send `temperature: 0` for greedy. OpenCode sends no sampling fields, and greedy thinking looped until `max_tokens` in its runs. `/v1/completions` and `/generate` keep greedy as their default |
 | `stop` | A nonempty string or list of nonempty stop strings |
 | `n` | 1 to 16 choices (non-streaming). The prompt is prefilled once by a one-token primer and published to the prefix cache; the n samples resume at its last chunk end (at most 64 tokens re-prefilled each) and decode side by side, up to the batch size at a time. With a `seed`, choice i uses seed + i; use a temperature above 0 for distinct choices |
 | `chat_template_kwargs.enable_thinking` | Thinking defaults to true; false disables it |
@@ -39,11 +39,12 @@ speculative scratch capacity.
 | `response_format` omitted/null/`{"type":"text"}` | Ordinary text output |
 | `response_format: {"type":"json_object"}` / `{"type":"json_schema","json_schema":{"schema":{...}}}` | Constrained: a JSON object / JSON valid against the schema ([constrained output](#constrained-output)) |
 | `trace` | `false` excludes this request from the opt-in [trace sink](operations.md#request-traces); accepted on every generation route |
-| `accept_top_k`, `accept_margin` | Relaxed speculative acceptance for greedy requests: a drafted token is also accepted when the target ranks it within its top `accept_top_k` and within `accept_margin` logits of the argmax (a log-probability ratio; 1.0 means at least 37% of the top probability). Faster, and no longer the target's exact continuation; the per-request `spec_relaxed_tokens` counts such tokens. **A greedy request that sets neither field gets the server's default**, which the serving profile chooses ([operations](operations.md#serving-profiles); `fast`: top-3 within 2.0, Flash-Next with DFlash2 top-2 within 1.0; `exact`: off). Send `accept_top_k: 1` for the exact continuation on one request. Sampled requests ignore both fields. Accepted on every generation route |
-| `accept_soft` | Relaxed speculative acceptance for sampled requests, s ≥ 0: a drafted token y (MTP or DFlash2) keeps its acceptance draw u and is also accepted when u · q(y) < e^s · p(y), q the draft's law and p the request's. No token then comes out more than e^s times as often as the target's law gives it (KL to the target ≤ s); `0` is exact sampling. Unset: the server's `--accept-soft` (`HIBANA_ACCEPT_SOFT`; `fast` 0.5 on Flash-Next, 0 elsewhere). Greedy requests ignore it |
+| `accept_top_k`, `accept_margin` | Relaxed speculative acceptance for greedy requests: a drafted token is also accepted when the target ranks it within its top `accept_top_k` and within `accept_margin` logits of the argmax (a log-probability ratio; 1.0 means at least 37% of the top probability). Faster, and no longer the target's exact continuation; the per-request `spec_relaxed_tokens` counts such tokens. **A greedy request that sets neither field gets the server's default**, which the serving profile chooses ([operations](operations.md#serving-profiles); `fast`: top-3 within 2.0, Flash-Next with DFlash2 top-2 within 1.0, Inkling top-2 within 0.5, Bolt off; `exact`: off). Send `accept_top_k: 1` for the exact continuation on one request. On a sampled request with `accept_soft` the two fields are its gate instead: only a draft the request's law ranks within its top `accept_top_k` and within `accept_margin` nats of its top token gets e^s. A sampled request that sets both gets that gate (`1` and `0`: none); one that does not set both gets the server's `--accept-soft-gate` (none unless the server sets one; Inkling's `fast`: 3:2.0), whatever single field it sends. Accepted on every generation route |
+| `accept_soft` | Relaxed speculative acceptance for sampled requests, s ≥ 0: a drafted token y (MTP, DFlash2 or DSpark) keeps its acceptance draw u and is also accepted when u · q(y) < e^s · p(y), q the draft's law and p the request's. No token then comes out more than e^s times as often as the target's law gives it (KL to the target ≤ s); `0` is exact sampling. Unset: the server's `--accept-soft` (`HIBANA_ACCEPT_SOFT`; `fast` 0.5 on Flash-Next and Nemotron, 0.25 on Inkling, gated 3:2.0; 0 elsewhere). With a gate (`accept_top_k` and `accept_margin` above, or the server's `--accept-soft-gate`, `HIBANA_ACCEPT_SOFT_GATE`) a draft outside it takes the exact test, so it never comes out more often than the target gives it. Greedy requests ignore it |
 
 `GET /get_server_info` reports `speculative.draft` (the served draft
-directory), `speculative.accept_default`, `spec_stats` (rounds, proposed, accepted, emitted, `relaxed_accepts`) and, when
+directory), `speculative.accept_default` (with `accept_soft_gate`: null, or the server's gate as `accept_top_k` and
+`accept_margin`), `spec_stats` (rounds, proposed, accepted, emitted, `relaxed_accepts`) and, when
 tracing is on, `scheduler.traces` (records, bytes, `dropped`).
 
 `none` does not install a token constraint;
@@ -108,6 +109,8 @@ engine.
   parsed calls come back as `tool_calls` (`tool_use` blocks on Messages).
 - A forced `tool_choice` cannot be combined with a JSON `response_format`; either needs `tools` / a schema.
 - `/get_server_info` counts constrained requests by kind (`constrained`).
+- Inkling 2 Mini rejects constrained requests (a JSON `response_format`, a required or named `tool_choice`) with 400:
+  its turns are framed by tokens the grammar cannot emit.
 
 ## Images
 
@@ -167,7 +170,7 @@ prompt length as `{"input_tokens": N}`.
 | `tool_choice` | `auto` or omitted: unconstrained. `none`: as in chat. `any` / `{"type":"tool","name":...}`: constrained, as chat's `required` / named function (one or more calls to any tool / exactly one call to that tool, [constrained output](#constrained-output)); they need `tools`, and the name must be one of them |
 | `thinking` | `enabled` or `adaptive` turn thinking on (`budget_tokens` is not enforced), `disabled` turns it off; omitted, `chat_template_kwargs.enable_thinking` decides, default on |
 | `output_config.effort` | As chat `reasoning_effort`: Claude Code's default `high` is the template's `xhigh`, `/effort low` its `low` (the template's instruction only, not a token budget) |
-| `temperature`, `top_p`, `top_k`, `stop_sequences`, `stream` | As the chat fields, except that an omitted `temperature` is Anthropic's 1.0 (with the chat defaults top_p 0.95 and top_k 20, the models' own generation config), not greedy. Claude Code sends no sampling fields, and greedy thinking looped until `max_tokens` in its sessions |
+| `temperature`, `top_p`, `top_k`, `stop_sequences`, `stream` | As the chat fields, except that an omitted `temperature` is Anthropic's 1.0 (with the chat defaults top_p 0.95 and top_k 20, Hibana's own), not greedy. Claude Code sends no sampling fields, and greedy thinking looped until `max_tokens` in its sessions |
 | `trace`, `accept_top_k`, `accept_margin`, `accept_soft`, `chat_template_kwargs` | Hibana's extensions, as in chat |
 
 `cache_control` markers are accepted and not acted on; the prefix cache

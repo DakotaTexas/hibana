@@ -6,6 +6,7 @@
     tools/lossy_gate.py --target qwen38 --name fewer-experts --profile exact --env HIBANA_X=1 --through full
     tools/lossy_gate.py --target flashnext --name experts3 --profile fast --env HIBANA_W3_CHECKPOINT=/path --battery hard
     tools/lossy_gate.py --target flashnext --name kv-fp4 --profile fast --env HIBANA_X=1 --battery long
+    tools/lossy_gate.py --target inkling --name fast --profile fast
 
 A candidate is a serving profile (`--profile`, default exact) plus `--env KEY=VALUE` overrides, resolved for the
 target exactly as `hibana serve <target> --<profile>` resolves them with those settings in its environment
@@ -21,7 +22,11 @@ Layers, cheapest first:
      continuations of the 28 frozen prompts of tools/gate/workloads/lossy_v1.json (code, math, prose,
      multilingual, structured, short chat), scored 64 rows per forward (the decode path) as
      argmax agreement and truncated KL(baseline || candidate); the floor is the baseline scored at
-     32 rows per forward against itself. Per domain.
+     32 rows per forward against itself. Per domain. Inkling runs its decode kernels only for decode
+     and verification rows, where its experts are shared and its FP8 trunk keeps BF16 activations in
+     calls of up to four rows: its continuations are scored one row per step through the plain decode
+     step (the baseline's tokens forced), and the floor is the baseline scored by prefill, 64 rows per
+     forward, against itself.
   2  Speculation health (same process): tokens per verify round, round cost and decode tok/s of
      each prompt, greedy with the profile's acceptance rule, paired per prompt; the floor is a
      second baseline pass. The speed delta of the verdict is the decode tok/s ratio here.
@@ -89,6 +94,7 @@ LOCK: Path | None = None  # $HIBANA_RESULTS/.gpu.lock, set by main()
 EVALS_ENV: dict | None = None  # sharar-eval's environment (evals_env), set by main()
 VENV = Path(os.environ.get("UV_PROJECT_ENVIRONMENT") or REPO / ".venv")  # the project's environment (uv sync)
 PROTOCOL = 3  # bump when a step's meaning changes (it keys the baseline cache); 3: arms resolved by hibana.launch
+CHUNKS = {"inkling": (1, 64)}  # (rows per forward, the floor's): 1 is the decode step (tools/gate/lossy_gate.py)
 CHUNK, FLOOR_CHUNK = 64, 32
 GUARD_GIB = guard.guard_kib() / 2**20  # where the memory guard acts: half the host floor (the pools are planned to leave the floor)
 BLOCK = 64  # layer-1 bootstrap unit: consecutive continuation positions
@@ -96,9 +102,9 @@ PROFILE_NAMES = launch.PROFILE_NAMES
 # EngineConfig fields the served arm must report exactly as the in-process arm installed them.
 CHECKED = ("target", "profile", "w3_decode", "w3_checkpoint", "stable_numerics", "flashnext_trunk",
            "trunk_keep_bf16", "draft_vocab", "draft_head",
-           "draft_head_rescore", "device_accept", "accept_default", "accept_soft",
+           "draft_head_rescore", "device_accept", "accept_default", "accept_soft", "accept_soft_gate",
            "qsa_sparse_graphs", "flashnext_experts", "ssm_state", "ssm_window",
-           "ssm_compensators", "bolt_experts")
+           "ssm_compensators", "bolt_experts", "inkling_trunk", "moe_keep", "moe_budget", "moe_budget_per_request")
 
 # Layer-3 stages: the sharar-eval suite each runs and the tasks its verdict reads (the suite's GSM8K-300 is the first
 # three shards of the full set, so the full stage reuses them).
@@ -191,11 +197,17 @@ def arm_plan(s: launch.Settings) -> dict:
     fetch 3-bit checkpoints: an arm serves what <target>-current holds)."""
     w3 = preflight.ensure_w3(s, fetch=False)
     cenv = {k: v for k, v in s.engine_env(w3).items() if k not in SERVER_ONLY}
+    alone = [d for d in s.get("HIBANA_SPEC_DEPTHS", "").split(",") if d.split(":")[0] == "1"]
+    if alone:  # the arm runs one request at a time: it verifies as a request alone is served
+        cenv["HIBANA_SPEC_DEPTHS"] = alone[0]
     spec = s.spec
     accept = accept_rule(s.get("HIBANA_ACCEPT_DEFAULT", "off")) if spec else "1:0.0"
     cenv["HIBANA_SPEC"], cenv["HIBANA_ACCEPT_DEFAULT"] = str(spec), accept
     # sampled requests' s, as `hibana engine` records it (0 without speculation)
     cenv["HIBANA_ACCEPT_SOFT"] = s.get("HIBANA_ACCEPT_SOFT", "0") if spec else "0"
+    from hibana.api.validation import parse_soft_gate
+    g = parse_soft_gate(s.get("HIBANA_ACCEPT_SOFT_GATE")) if spec else (1, 0.0)
+    cenv["HIBANA_ACCEPT_SOFT_GATE"] = f"{g[0]}:{g[1]}"
     return {"target": s.target, "env": cenv, "proposer": s.proposer, "spec": spec,
             "verify_state": s.get("HIBANA_VERIFY_STATE", "reconstruct"), "draft_precision": s.get("HIBANA_DRAFT_PRECISION", "bf16"),
             "draft": str(s.draft_dir) if s.draft_dir else None, "accept": accept}
@@ -288,13 +300,14 @@ def tool_command(plan: dict, results: Path, hf_cache: str, out: Path, base: Path
            "PYTHONPATH": f"{REPO / 'tools'}:{REPO}", "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUNBUFFERED": "1",
            "HIBANA_HF_CACHE": hf_cache, "HF_HUB_OFFLINE": "1", "TOKENIZERS_PARALLELISM": "false",
            "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True", "HIBANA_RESULTS": str(results), **plan["env"]}
+    chunk, floor_chunk = CHUNKS.get(plan["target"], (CHUNK, FLOOR_CHUNK))
     cmd = [str(VENV / "bin" / "python"), "-m", "gate.lossy_gate", "--prompts", str(WORKLOAD),
            "--out", str(out), "--accept", plan["accept"], "--proposer", plan["proposer"], "--spec", str(plan["spec"]),
-           "--verify-state", plan["verify_state"], "--draft-precision", plan["draft_precision"], "--chunk", str(CHUNK)]
+           "--verify-state", plan["verify_state"], "--draft-precision", plan["draft_precision"], "--chunk", str(chunk)]
     if plan["draft"]:
         cmd += ["--draft", plan["draft"]]
     if base is None:
-        cmd += ["--passes", "2", "--floor-chunk", str(FLOOR_CHUNK)]
+        cmd += ["--passes", "2", "--floor-chunk", str(floor_chunk)]
     else:
         cmd += ["--base", str(base)]
     return lxcfs.wrap(cmd), env
@@ -581,7 +594,9 @@ def summary_md(card: dict) -> str:
              f"prompts `{m['workload']}` (sha256 {m['workload_sha256'][:12]}). Baseline arm: `{m['baseline_dir']}`.", "",
              "Why: " + "; ".join(card["why"]), ""]
     if l1:
-        lines += ["## Layer 1: distribution distance (decode path, 64 rows per forward; floor: baseline at 32 rows)", "",
+        chunk, floor_chunk = CHUNKS.get(m["target"], (CHUNK, FLOOR_CHUNK))
+        scored = "the plain decode step, one row a forward" if chunk == 1 else f"decode path, {chunk} rows per forward"
+        lines += [f"## Layer 1: distribution distance ({scored}; floor: baseline at {floor_chunk} rows)", "",
                   "| domain | positions | KL | floor KL | excess KL [95%] | argmax | floor argmax | within floor |", "|---|---:|---:|---:|---:|---:|---:|---|"]
         for dom, d in sorted(l1.items(), key=lambda kv: kv[0] == "all"):
             e = d["kl_excess"]
@@ -645,7 +660,7 @@ def parse_env(items: list[str]) -> dict:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--target", choices=("flashnext", "qwen38"), required=True)
+    ap.add_argument("--target", choices=("flashnext", "qwen38", "inkling"), required=True)
     ap.add_argument("--name", required=True, help="candidate name (the output directory: <date>-lossy-gate-<name>)")
     ap.add_argument("--profile", choices=PROFILE_NAMES, default="exact", help="the candidate's serving profile")
     ap.add_argument("--env", action="append", default=[], help="HIBANA_KEY=VALUE override of the candidate (repeatable)")

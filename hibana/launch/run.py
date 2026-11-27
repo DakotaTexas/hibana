@@ -54,7 +54,7 @@ def settings_for(args, **kw) -> Settings:
 def serve(args) -> int:
     if not args.target and not (os.environ.get("HIBANA_TARGET") or read_config_file(config_file()).get("HIBANA_TARGET")):
         # serving takes the GPU and may start a download of 26-135 GB: only on a model someone named
-        sys.exit("hibana serve: name a model: 27b, flashnext, nemotron or bolt (or set HIBANA_TARGET)")
+        sys.exit("hibana serve: name a model: 27b, flashnext, nemotron, bolt or inkling (or set HIBANA_TARGET)")
     try:
         s = settings_for(args, traces=args.traces, tp=args.tp)
     except ValueError as exc:
@@ -137,7 +137,8 @@ def status(args) -> int:
         cfg, spec, stats = info.get("config") or {}, info.get("speculative") or {}, info.get("spec_stats") or {}
         print(f"{s.target}: serving on {s.url} from {how}, profile {cfg.get('profile')}, {info.get('tp_size', 1)} Spark(s), "
               f"context {info.get('context_length')}, up to {info.get('max_running_requests')} requests")
-        print(f"  draft {spec.get('draft') or 'the target MTP head'}, precision {spec.get('draft_precision')}")
+        own = "the checkpoint's bundled DSpark" if spec.get("algorithm") == "dspark" else "the target MTP head"
+        print(f"  draft {spec.get('draft') or own}, precision {spec.get('draft_precision')}")
         if stats.get("rounds"):
             print(f"  {stats['rounds']} speculative rounds: {stats['tokens_per_round']:.2f} tokens per round, {stats.get('round_ms', 0):.1f} ms each")
         traces = (info.get("scheduler") or {}).get("traces") or info.get("traces")

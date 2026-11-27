@@ -5,6 +5,7 @@ deletes keep their order, completions come back in submission order whichever
 writer finishes first, and a flush starts a new epoch that nothing in flight
 can write into."""
 import errno
+import json
 import mmap
 import os
 import threading
@@ -334,3 +335,19 @@ def test_a_restart_deletes_epochs_a_crash_left_behind(tmp_path):
             break
         time.sleep(0.01)
     assert not (store.base / "e0").exists() and restarted.dir.exists()
+
+
+def test_inkling_store_identity_keeps_trunks_sharing_and_kernels_apart(monkeypatch, tmp_path):
+    """An Inkling server's stored prefixes are keyed by its trunk format, its expert sharing and its kernels' sources, so
+    a `fast` server never restores what an `exact` one stored, nor a server what an older kernel wrote."""
+    from hibana.engine.config import EngineConfig
+    from hibana.model.inkling import model
+    base = EngineConfig.from_env({})
+    arms = [base, base.replace(inkling_trunk="fp8"), base.replace(inkling_trunk="fp8", moe_keep=4, moe_budget_per_request=12, moe_budget=48)]
+    seen = [json.dumps(model.arithmetic_identity(cfg), sort_keys=True) for cfg in arms]
+    assert len(set(seen)) == 3, seen
+    assert "moe_sharing" not in model.arithmetic_identity(base.replace(moe_keep=8))  # keep all 8: no sharing
+    changed = tmp_path / "inkling.cu"
+    changed.write_bytes(model.KERNEL_SOURCES[0].read_bytes() + b"// changed\n")
+    monkeypatch.setattr(model, "KERNEL_SOURCES", (changed, *model.KERNEL_SOURCES[1:]))
+    assert json.dumps(model.arithmetic_identity(base), sort_keys=True) != seen[0]

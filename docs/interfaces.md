@@ -126,7 +126,9 @@ width `k` and immutable `ProposerRequirements`, and is installed once before gra
 width (`max_depth`), context and features before allocating shared verify buffers, without knowing the adapter's
 name. MTP supports k=1–8 and DFlash2 k=1–15. Target verify graphs have batch buckets 1, 2, 4, ... up to `max_batch`
 (at most 128). With a depth per bucket or per request (`engine/depth.py`), each depth's verify graphs cover only its
-buckets and a bucket at depth 0 decodes plainly while the proposer still ingests every committed row. A proposer
+buckets and a bucket at depth 0 decodes plainly while the proposer still ingests every committed row: a request at a
+time through `ingest_prefill`, or with `Capabilities.batched_commit` (DSpark) all of a step's rows in one
+`accepted_batch` call (width 1). A proposer
 with `Capabilities.short_drafts` (MTP and DFlash2) gets `propose(..., depth=d)` and drafts only those `d` tokens (a
 DFlash2 round runs one block of the anchor and `d` masked rows), and its `capture_graphs(log, depths={d: buckets})`
 receives the verify graphs' pairs (DFlash2 captures a draft graph at each; MTP's one-step graphs serve every depth);
@@ -152,7 +154,7 @@ a depth per request in packed verify graphs, accepted on the host (a target with
 
 Optional features are declared in `ProposerRequirements.capabilities` and read once at setup; `check_capabilities`
 rejects a flag without its protocol: `device_feedback` (below), `checkpoint_cache`, `stored_payload` (SSD-tier
-codec), `draft_head`, `short_drafts`.
+codec), `draft_head`, `short_drafts`, `batched_commit`.
 
 The driver verifies `[pending, proposal...]` with greedy prefix acceptance or exact rejection sampling, then
 truncates to EOS/budget. For sampled verification, probabilities are FP32 after temperature/top-k/top-p and all

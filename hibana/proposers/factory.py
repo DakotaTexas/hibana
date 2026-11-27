@@ -2,7 +2,7 @@
 
 from hibana.target import DEFAULT_TARGET
 
-MAX_DEPTHS = {"mtp": 8, "dflash2": 15}
+MAX_DEPTHS = {"mtp": 8, "dflash2": 15, "dspark": 7}
 
 
 def draft_snapshot(proposer, draft_dir=None, target=None):
@@ -68,6 +68,12 @@ def create(proposer, k, model, context, num_pages, *, draft_precision='bf16', dr
         calibration = dict(model.target.draft_calibration).get(proposer)
         if draft_dir is None and calibration is not None:  # the pinned draft's own fit; --draft checkpoints score raw
             adapter.calibration = calibration
+    elif proposer == "dspark":
+        from hibana.proposers.dspark import DSparkProposer
+        draft = getattr(model, "draft", None)
+        if draft is None:
+            raise ValueError("DSpark serves Inkling's bundled drafter, loaded with the model when HIBANA_SPEC is not 0")
+        adapter = DSparkProposer(draft, context, k, model.state_slots)
     else:
         raise ValueError(f"unknown proposer {proposer!r}")
     return adapter

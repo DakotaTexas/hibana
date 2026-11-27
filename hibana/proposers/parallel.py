@@ -83,11 +83,14 @@ class DraftState:
 
 
 class ParallelProposer:
+    final_norm = False  # the draft also reads the target's final norm rows (set from the model)
+
     def __init__(self, model, context, k, name):
         import flashinfer
         if not 1 <= k <= getattr(model, 'max_depth', 15):
             raise ValueError('draft depth exceeds the checkpoint trained block size')
         self.model, self.context, self.k, self.name = model, context, k, name
+        self.final_norm = getattr(model, 'final_norm', False)
         self.feedback_graphs = None
         self._feedback_enabled = False
         self.window = model.window
@@ -107,7 +110,7 @@ class ParallelProposer:
         # FlashInfer's split-KV scratch for the draft's attention grows with the drafted rows: 161 MB at 64 requests x 7
         # rows over the feature window
         self.workspace = torch.empty(128 * 2**20 * max(1, -(-context.max_batch // 32)), dtype=torch.uint8, device=device)
-        self.requirements = ProposerRequirements(name, FeatureRequest(layers=model.features),
+        self.requirements = ProposerRequirements(name, FeatureRequest(final_norm=self.final_norm, layers=model.features),
                                                 persistent_bytes=self.bytes, greedy_only=False, max_depth=getattr(model, 'max_depth', 15),
                                                 capabilities=Capabilities(device_feedback=True, checkpoint_cache=True,
                                                                           stored_payload=True, short_drafts=True, scored_drafts=True))
@@ -134,6 +137,10 @@ class ParallelProposer:
         feedback_bytes = self.feedback_graphs.bytes if self.feedback_graphs is not None else 0
         return (self.model.bytes + sum(t.numel() * t.element_size() for t in tensors)
                 + self.feature_cache.capacity + self.workspace.numel() + feedback_bytes)
+
+    def _project(self, layers, norm):
+        """The draft's context rows from the target's tapped rows (and its final norm, for a draft that taps it)."""
+        return self.model.project_features(layers, norm) if self.final_norm else self.model.project_features(layers)
 
     def _state(self, req):
         if req.proposer_state is None:
@@ -190,7 +197,7 @@ class ParallelProposer:
         end = start + len(ids)
         # Split at snapshot boundaries before the ring overwrites their history.
         bounds = sorted({p for p in req.private if start < p < end} | {end})
-        projected = self.model.project_features(result['features'])
+        projected = self._project(result['features'], result.get('norm'))
         offset = start
         for limit in bounds:
             # A long first prefill can exceed a sliding window. Only its last
@@ -321,6 +328,8 @@ class ParallelProposer:
                        for s, start in zip(states, starts))
                 or len({s.slot for s in states}) != len(states)):
             raise ValueError('accepted rows do not follow private draft prefixes')
+        if self.final_norm and (features.norm is None or features.norm.shape[1] < max(counts)):
+            raise ValueError('accepted features do not cover the committed rows')
         if features.layers is None or any(features.layers[lid].ndim != 3 or features.layers[lid].shape[0] != len(requests)
                                          or features.layers[lid].shape[1] < max(counts) for lid in self.model.features):
             raise ValueError('accepted features do not cover the committed rows')
@@ -331,7 +340,8 @@ class ParallelProposer:
             return
         layers = {lid: torch.cat([features.layers[lid][row, :count] for row, count in enumerate(counts)])
                   for lid in self.model.features}
-        hidden = self.model.project_features(layers)
+        norm = torch.cat([features.norm[row, :count] for row, count in enumerate(counts)]) if self.final_norm else None
+        hidden = self._project(layers, norm)
         # One asynchronous upload; no GPU scalar extraction or per-row wait.
         metadata = [[pos, state.slot * self.window + pos % self.window,
                      state.slot * self.pitch + pos % self.window]
@@ -373,7 +383,8 @@ class ParallelProposer:
         to the dummy ring slot 0, whose contents only padded draft rows read.
         """
         batch = starts.shape[0]
-        hidden = self.model.project_features({lid: features[lid][:batch * steps] for lid in self.model.features})
+        hidden = self._project({lid: features[lid][:batch * steps] for lid in self.model.features},
+                               norm.reshape(-1, norm.shape[-1])[:batch * steps] if self.final_norm else None)
         offsets = torch.arange(steps, device=starts.device)
         positions = starts[:, None] + offsets[None, :]
         valid = offsets[None, :] < counts[:, None]
@@ -403,7 +414,8 @@ class ParallelProposer:
             self.feedback_graphs.run(req, emitted, features, row)
             return
         self.ingest_prefill(req, emitted, req.committed_len - count,
-                            {'features': {lid: rows[row, :count] for lid, rows in features.layers.items()}})
+                            {'features': {lid: rows[row, :count] for lid, rows in features.layers.items()},
+                             'norm': features.norm[row, :count] if self.final_norm else None})
         self._state(req).pending = None if req.finished else emitted[-1]
 
     def prepare_release(self, req, snapshot):

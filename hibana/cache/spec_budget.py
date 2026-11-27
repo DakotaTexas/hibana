@@ -97,5 +97,13 @@ def budget(spec, batch, *, cache_slots=96, target=None):
         fixed += (batch + cache_slots + 2) * window * cfg['hidden_size'] * 2
         fixed += cfg['num_hidden_layers'] * (batch + 1) * (window + spec.depth + 1) * 2 * cfg['num_key_value_heads'] * cfg['head_dim'] * 2
         fixed += weights + 2 * largest + 128 * 2**20 * max(1, -(-batch // 32))  # the draft attention's workspace
+    elif spec.name == 'dspark':
+        # Inkling's bundled drafter loads with the model: only its head context, workspaces and per-page context K/V
+        # come later
+        cfg = json.loads((t.snapshot_dir() / 'config.json').read_text())['mtp_config']
+        fixed += 256 * 2**20 + cache_slots * cfg['hidden_size'] * 2
+        page_bytes = cfg['num_hidden_layers'] * 2 * cfg['num_key_value_heads'] * cfg['head_dim'] * 2
+    # the model's own per-slot state after each verified row (`StatePool.aux`)
+    fixed += batch * (spec.depth + 1) * t.slot_state_bytes
     # CUDA graphs, workspaces and cached activation blocks are counted once, by `ledger.after_plan_bytes`.
     return fixed, page_bytes

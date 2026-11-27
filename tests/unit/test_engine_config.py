@@ -19,6 +19,8 @@ def test_accept_soft_is_a_finite_number_at_least_zero():
     for bad in ("inf", "nan", "-1", "x"):
         with pytest.raises(ValueError, match="HIBANA_ACCEPT_SOFT must be a finite number >= 0"):
             EngineConfig.from_env({"HIBANA_ACCEPT_SOFT": bad})
+    assert EngineConfig.from_env({}).accept_soft_gate == "off"
+    assert EngineConfig.from_env({"HIBANA_ACCEPT_SOFT_GATE": "3:2.0"}).accept_soft_gate == "3:2.0"
 
 
 def test_environment_names_are_unchanged():

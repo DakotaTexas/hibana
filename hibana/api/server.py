@@ -64,6 +64,11 @@ def create_app(engine: EngineLoop, tok: SnapshotTokenizer, tmpl: ChatTemplate, d
     input, else None."""
     MODEL_ID = describe.get("model_path", targets.DEFAULT_TARGET.model_id)  # the served checkpoint id, reported as the model name
     markers = media.Markers(tok, vision) if vision is not None else None
+    chat_format = getattr(tmpl, "chat_format", "qwen")  # how the target frames a turn (`Target.chat_format`)
+
+    def chat_detok(stop) -> Detokenizer:
+        """A chat reply's detokenizer: Inkling frames its turn with special tokens the parser reads as text."""
+        return Detokenizer(tok, stop, skip_special=chat_format != "inkling")
     @asynccontextmanager
     async def lifespan(app):
         yield
@@ -97,6 +102,9 @@ def create_app(engine: EngineLoop, tok: SnapshotTokenizer, tmpl: ChatTemplate, d
 
     def _constraint(spec: tuple[str, object], tools: list | None, in_reasoning: bool):
         """The request's Constraint (engine/grammar.py); compiling runs off the event loop."""
+        if chat_format == "inkling":
+            raise InvalidRequest("constrained output (response_format, a required or named tool_choice) "
+                                 "is not supported for this target")
         if grammar_builder[0] is None:  # the served target's vocabulary: the masks cover its logits rows
             served = targets.get(describe.get("target"))
             grammar_builder[0] = Grammars.from_tokenizer(tok._tok, served.vocab_size, served.stop_token_ids)
@@ -181,7 +189,7 @@ def create_app(engine: EngineLoop, tok: SnapshotTokenizer, tmpl: ChatTemplate, d
         Content is held back once a tool call starts; the final step carries
         the parsed calls, with reason "tool_calls" when there are any. Returns
         early when the client disconnects; raises EngineUnavailable on engine failure."""
-        rp = ReasoningParser(in_reasoning, tools=bool(tools))
+        rp = _chat_parser(chat_format, in_reasoning, tools)
         out: list[int] = []
         buffered_tool = ""
         while True:
@@ -412,8 +420,9 @@ def create_app(engine: EngineLoop, tok: SnapshotTokenizer, tmpl: ChatTemplate, d
         # OpenAI API, vLLM and SGLang: a fixed default cut off clients that leave it unset (Aider) mid-thought.
         limit = describe.get("context_length", targets.DEFAULT_TARGET.context_length)
         if "temperature" not in body and "temperature" not in (body.get("sampling_params") or {}):
-            # OpenAI's default temperature, and both targets' generation_config (top_p 0.95 and top_k 20 are the
-            # defaults). OpenCode sends no sampling fields; greedy thinking looped to max_tokens in its runs.
+            # OpenAI's default temperature. top_p 0.95 and top_k 20 are Hibana's defaults, not every checkpoint's
+            # generation_config: the fused sampled verify needs a top_k. OpenCode sends no sampling fields; greedy
+            # thinking looped to max_tokens in its runs.
             body = {**body, "temperature": 1.0}
         params = _sampling_from(body, max_default=max(1, limit - len(ids)))
         params.message_boundary = boundary
@@ -444,7 +453,7 @@ def create_app(engine: EngineLoop, tok: SnapshotTokenizer, tmpl: ChatTemplate, d
                 sent_role = False
                 try:
                     async for r_delta, c_delta, calls, finished, reason, n_out in _chat_steps(
-                            ticket, Detokenizer(tok, stop), http, in_reasoning, tools):
+                            ticket, chat_detok(stop), http, in_reasoning, tools):
                         delta: dict[str, Any] = {}
                         if not sent_role:
                             delta["role"] = "assistant"
@@ -466,8 +475,8 @@ def create_app(engine: EngineLoop, tok: SnapshotTokenizer, tmpl: ChatTemplate, d
                 yield "data: [DONE]\n\n"
             return StreamingResponse(_stream(events(), ticket), media_type="text/event-stream")
 
-        out, text, reason = await _collect(ticket, Detokenizer(tok, stop), http)
-        reasoning, content, calls = _split_chat(text, in_reasoning, tools)
+        out, text, reason = await _collect(ticket, chat_detok(stop), http)
+        reasoning, content, calls = _split_chat(text, in_reasoning, tools, chat_format)
         message: dict[str, Any] = {"role": "assistant", "content": content if content or not calls else None}
         if reasoning:
             message["reasoning_content"] = reasoning
@@ -504,10 +513,10 @@ def create_app(engine: EngineLoop, tok: SnapshotTokenizer, tmpl: ChatTemplate, d
         base = params.seed
         tickets = [await _submit(ids, dataclasses.replace(params, seed=None if base is None else base + i), prompt_media)
                    for i in range(n)]
-        results = await asyncio.gather(*[_collect(t, Detokenizer(tok, stop), http) for t in tickets])
+        results = await asyncio.gather(*[_collect(t, chat_detok(stop), http) for t in tickets])
         choices, completion, reasoning_total = [], 0, 0
         for i, (out, text, reason) in enumerate(results):
-            reasoning, content, calls = _split_chat(text, in_reasoning, tools)
+            reasoning, content, calls = _split_chat(text, in_reasoning, tools, chat_format)
             message: dict[str, Any] = {"role": "assistant", "content": content if content or not calls else None}
             if reasoning:
                 message["reasoning_content"] = reasoning
@@ -584,8 +593,9 @@ def create_app(engine: EngineLoop, tok: SnapshotTokenizer, tmpl: ChatTemplate, d
         if isinstance(max_tokens, (int, float)) and not isinstance(max_tokens, bool):
             max_tokens = min(max_tokens, limit - len(ids))  # clients size max_tokens for a larger window
         sampling = {k: body[k] for k in ("temperature", "top_p", "top_k", "trace", "accept_top_k", "accept_margin", "accept_soft") if k in body}
-        # Anthropic's default temperature, and both targets' generation_config (top_p 0.95 and top_k 20 are the
-        # chat defaults). Claude Code sends no sampling fields; greedy thinking looped to max_tokens in its sessions.
+        # Anthropic's default temperature. top_p 0.95 and top_k 20 are Hibana's defaults, not every checkpoint's
+        # generation_config: the fused sampled verify needs a top_k. Claude Code sends no sampling fields; greedy
+        # thinking looped to max_tokens in its sessions.
         sampling.setdefault("temperature", 1.0)
         params = _sampling_from({**sampling, "max_tokens": max_tokens})
         params.message_boundary = boundary
@@ -602,7 +612,7 @@ def create_app(engine: EngineLoop, tok: SnapshotTokenizer, tmpl: ChatTemplate, d
             return {"input_tokens": len(ids) - cached, "output_tokens": n_out,
                     "cache_creation_input_tokens": 0, "cache_read_input_tokens": cached}
 
-        detok = Detokenizer(tok, stop)
+        detok = chat_detok(stop)
         if body.get("stream"):
             sse = messages_api.sse
 
@@ -632,7 +642,7 @@ def create_app(engine: EngineLoop, tok: SnapshotTokenizer, tmpl: ChatTemplate, d
             return StreamingResponse(_stream(events(), ticket), media_type="text/event-stream")
 
         out, text, reason = await _collect(ticket, detok, http)
-        reasoning, content, calls = _split_chat(text, in_reasoning, tools)
+        reasoning, content, calls = _split_chat(text, in_reasoning, tools, chat_format)
         stop_reason, stop_sequence = messages_api.stop_reason("tool_calls" if calls else reason, detok.stop_hit)
         return {"id": mid, "type": "message", "role": "assistant", "model": model,
                 "content": messages_api.content_blocks(reasoning, content, calls),
@@ -760,9 +770,17 @@ def _tool_arguments_as_objects(messages: list[dict]) -> list[dict]:
     return out
 
 
-def _split_chat(text: str, in_reasoning: bool, tools: list | None) -> tuple[str, str, list[dict]]:
+def _chat_parser(chat_format: str, in_reasoning: bool, tools: list | None):
+    """The reply parser of the target's chat format (`Target.chat_format`)."""
+    if chat_format == "inkling":
+        from hibana.api.parsers.inkling import InklingParser
+        return InklingParser(in_reasoning, tools=bool(tools))
+    return ReasoningParser(in_reasoning, tools=bool(tools))
+
+
+def _split_chat(text: str, in_reasoning: bool, tools: list | None, chat_format: str = "qwen") -> tuple[str, str, list[dict]]:
     """Complete chat output as (reasoning, content, tool_calls)."""
-    rp = ReasoningParser(in_reasoning, tools=bool(tools))
+    rp = _chat_parser(chat_format, in_reasoning, tools)
     rp.feed(text)
     rp.finish()
     content, calls = (parse_tool_calls(rp.content, tools) if tools else (rp.content, []))
@@ -803,13 +821,13 @@ def _queue_depth(profile_max_queued: int, max_batch: int, configured: int = 0) -
 def serve(host: str, port: int, log=print, spec: int = 0, proposer: str = "mtp", state_strategy: str = "snapshots", draft_precision: str = 'bf16',
           traces: str | None = None, traces_max_mib: int = 32768, draft_dir: str | None = None,
           accept_default: tuple[int, float] = (1, 0.0), target: str | None = None, max_context: int | None = None,
-          max_batch: int = 4, accept_soft: float = 0.0) -> None:
+          max_batch: int = 4, accept_soft: float = 0.0, accept_soft_gate: tuple[int, float] = (1, 0.0)) -> None:
     from hibana.cache.spec_budget import SpecConfig
     from hibana.api.validation import set_accept_default
 
     if (accept_default != (1, 0.0) or accept_soft) and not spec:
         raise ValueError('a relaxed acceptance default requires speculation')
-    set_accept_default(*accept_default, soft=accept_soft)
+    set_accept_default(*accept_default, soft=accept_soft, soft_gate=accept_soft_gate)
 
     if not spec and draft_precision != 'bf16':
         raise ValueError('draft precision requires speculation')
@@ -821,15 +839,17 @@ def serve(host: str, port: int, log=print, spec: int = 0, proposer: str = "mtp",
         from hibana.proposers.factory import draft_snapshot
         if proposer == 'dflash2':  # fail before loading the target
             draft = json.loads((draft_snapshot(proposer, draft_dir, served) / 'config.json').read_text())
-            if draft['hidden_size'] != served.hidden_size or max(draft['dflash_config']['target_layer_ids']) >= served.num_layers:
-                raise ValueError(f"the DFlash2 draft (hidden {draft['hidden_size']}, taps {draft['dflash_config']['target_layer_ids']}) "
+            taps = draft['dflash_config']['target_layer_ids']
+            if (draft['hidden_size'] != served.hidden_size or any(t >= served.num_layers for t in taps[:-1])
+                    or taps[-1] > served.num_layers):
+                raise ValueError(f"the DFlash2 draft (hidden {draft['hidden_size']}, taps {taps}) "
                                  f"was not trained on {served.name} (hidden {served.hidden_size}, {served.num_layers} layers)")
 
     from hibana.engine.executor import Executor
     from hibana.engine.scheduler import SchedulerConfig
     snap = served.snapshot_dir()
     tok = SnapshotTokenizer(snap)
-    tmpl = ChatTemplate(snap, served.template_defaults)
+    tmpl = ChatTemplate(snap, served.template_defaults, served.chat_format)
     log(f"loading {served.name}: {served.model_id}@{served.model_revision[:8]}")
     model = targets.load_model(served, snap, log=log)
     from hibana.engine.config import current
@@ -888,7 +908,10 @@ def serve(host: str, port: int, log=print, spec: int = 0, proposer: str = "mtp",
                         "draft_precision": draft_precision, "draft": getattr(ex.spec.proposer.model, "source", None)
                         if hasattr(ex.spec.proposer, "model") else None,
                         "accept_default": {"accept_top_k": accept_default[0], "accept_margin": accept_default[1],
-                                           "accept_soft": accept_soft}} if spec else None,
+                                           "accept_soft": accept_soft,
+                                           "accept_soft_gate": None if accept_soft_gate == (1, 0.0) else
+                                           {"accept_top_k": accept_soft_gate[0], "accept_margin": accept_soft_gate[1]}}}
+        if spec else None,
         "attention_backend": "flashinfer",
         # the chunked GDN prefill (kernels/gdn_prefill.backend): CuTe on SM12x for the FP32 state, else Triton
         "gdn_backend": current().gdn_prefill if current().gdn_prefill != "auto" else

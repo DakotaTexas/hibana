@@ -1,7 +1,9 @@
 """Relaxed acceptance for sampled requests (SamplingParams.accept_soft s): a draft keeps its uniform, scaled by e^-s,
 and is accepted when u * q(y) < e^s * p(y). At one verify slot the first emitted token then has the law
     P(x) = min(q(x), e^s p(x)) + (1 - alpha) (p(x) - q(x))+ / Z,
-with alpha = sum_y min(q(y), e^s p(y)), so P(x) <= e^s p(x); s = 0 is exact sampling. Checked by Monte Carlo through
+with alpha = sum_y min(q(y), e^s p(y)), so P(x) <= e^s p(x); s = 0 is exact sampling. With a gate (accept_top_k K,
+accept_margin M) e^s applies only on G, the tokens p ranks within its top K and within M nats of its top token, and 1
+elsewhere, so a token outside G never comes out more often than p gives it. Checked by Monte Carlo through
 verify_rows and verify_batch for MTP's point-mass drafts and DFlash2's draft laws (the fused kernel:
 tests/gpu/test_sampled_kernels.py)."""
 import math
@@ -16,6 +18,7 @@ from hibana.engine.sampler import InvalidRequest, SamplingParams
 
 P = torch.tensor([0.60, 0.30, 0.07, 0.03])  # the target's law
 Q = torch.tensor([0.90, 0.06, 0.02, 0.02])  # a drafter sharper than its target
+Q_G = torch.tensor([0.50, 0.20, 0.25, 0.05])  # above P outside the gates' G, so a gate changes the law
 SOFTS = (0.0, 0.25, 0.5)
 
 
@@ -23,10 +26,17 @@ def params(s, **kw):
     return SamplingParams(temperature=1.0, top_k=-1, top_p=1.0, accept_soft=s, **kw)
 
 
-def soft_law(s, y=None):
-    """The first token's law: DFlash2's draft law Q, or (y given) MTP's point mass at y."""
-    q = Q if y is None else torch.nn.functional.one_hot(torch.tensor(y), 4).float()
-    a = torch.minimum(q, math.exp(s) * P)
+def gate_set(top_k, margin):
+    """G: the tokens P ranks within its top top_k and within margin nats of its top token."""
+    rank = (P.unsqueeze(0) > P.unsqueeze(1)).sum(1)
+    return (rank < top_k) & (P.max().log() - P.log() <= margin)
+
+
+def soft_law(s, y=None, gate=None, q=Q):
+    """The first token's law: DFlash2's draft law q, or (y given) MTP's point mass at y; e^s only on the gate's G."""
+    q = q if y is None else torch.nn.functional.one_hot(torch.tensor(y), 4).float()
+    c = torch.full((4,), math.exp(s)) if gate is None else torch.where(gate_set(*gate), math.exp(s), 1.0)
+    a = torch.minimum(q, c * P)
     left = (P - q).clamp(min=0)
     return a + (1 - a.sum()).clamp(min=0) * left / left.sum()
 
@@ -63,23 +73,28 @@ def test_verify_batch_law(draft):
         assert (got <= math.exp(s) * P + 0.012).all()
 
 
+@pytest.mark.parametrize("gate", [None, (2, 1.0)])  # gated: MTP drafts outside G, DFlash2 draws from Q_G
 @pytest.mark.parametrize("draft", ["mtp", "dflash2"])
-def test_verify_rows_law(draft):
+def test_verify_rows_law(draft, gate):
     n = 12_000
     torch.manual_seed(2)
     p = P.expand(2, 4).contiguous()
+    y, law_q = (1, Q) if gate is None else (2, Q_G)
+    top_k, margin = gate or (1, 0.0)  # (1, 0.0): no gate
     for s in (0.0, 0.25, 1.0):
+        sp = params(s, accept_top_k=top_k, accept_margin=margin)
         counts = torch.zeros(4)
         for i in range(n):
             g = torch.Generator().manual_seed(i)
             if draft == "dflash2":
-                tokens, q, support = torch.multinomial(Q, 1, generator=g), Q.view(1, 4), torch.arange(4).view(1, 4)
+                q, support = law_q.view(1, 4), torch.arange(4).view(1, 4)
+                tokens = torch.multinomial(law_q, 1, generator=g)
             else:
-                tokens, q, support = torch.tensor([1]), None, None
-            a, c, _ = verify_rows(tokens, p, q, support, g, soft_scale=params(s).soft_scale)
+                tokens, q, support = torch.tensor([y]), None, None
+            a, c, _ = verify_rows(tokens, p, q, support, g, soft_scale=sp.soft_scale, gate=sp.soft_gate)
             counts[int(tokens[0]) if int(a) > 0 else int(c)] += 1
-        law = soft_law(s) if draft == "dflash2" else soft_law(s, 1)
-        assert (counts / n - law).abs().max() < 0.02, (draft, s, counts / n, law)
+        law = soft_law(s, gate=gate, q=law_q) if draft == "dflash2" else soft_law(s, y, gate)
+        assert (counts / n - law).abs().max() < 0.02, (draft, gate, s, counts / n, law)
 
 
 def test_soft_zero_is_exact():
@@ -122,14 +137,53 @@ def test_flags_mark_only_the_boosted_accepts():
     assert soft[2].any()
 
 
-def test_sampled_rows_ignore_top_k_and_margin():
-    n = 2_000
+GATES = ((2, 1.0), (3, 2.5))  # G = {0, 1}: token 2 is 2.15 nats below the top; G = {0, 1, 2}
+
+
+# MTP drafts the last token inside G (mtp-mid at 2:1.0, mtp-tail at 3:2.5) and the first outside (mtp-tail at 2:1.0)
+@pytest.mark.parametrize("draft, gate", [("mtp-mid", GATES[0]), ("mtp-tail", GATES[0]), ("mtp-tail", GATES[1]),
+                                         ("dflash2", GATES[0]), ("dflash2", GATES[1])])
+def test_verify_batch_gated_law(draft, gate):
+    n, s = 40_000, 0.5
+    logits = P.log().expand(n, 2, 4).contiguous()
+    if draft == "dflash2":
+        tokens = torch.multinomial(Q_G, n, replacement=True, generator=torch.Generator().manual_seed(7)).view(n, 1)
+        q, support = Q_G.expand(n, 1, 4).contiguous(), torch.arange(4).expand(n, 1, 4).contiguous()
+        law = soft_law(s, gate=gate, q=Q_G)
+    else:
+        y = {"mtp-mid": 1, "mtp-tail": 2}[draft]
+        tokens, q, support, law = torch.full((n, 1), y), None, None, soft_law(s, y, gate)
+    gens = [torch.Generator().manual_seed(20 * n + i) for i in range(n)]
+    accepted, correction, flags, _ = verify_batch(tokens, logits, [params(s, accept_top_k=gate[0], accept_margin=gate[1])] * n, gens, q, support)
+    got = torch.bincount(first_tokens(tokens, accepted, correction), minlength=4).float() / n
+    assert (got - law).abs().max() < 0.012, (draft, gate, got, law)
+    outside = ~gate_set(*gate)
+    assert (got[outside] <= P[outside] + 0.012).all()  # outside the gate: never more often than the target
+    if draft != "dflash2" and not bool(gate_set(*gate)[tokens[0, 0]]):
+        assert not flags.any()  # a draft outside the gate takes the exact test only
+
+
+def test_a_gate_holding_every_token_is_the_ungated_rule():
+    n = 4_000
     tokens, logits, q, support = dflash2_rows(n, 5)
     for s in (0.0, 0.5):
         plain = verify_batch(tokens, logits, [params(s)] * n, generators(n), q, support)
-        km = verify_batch(tokens, logits, [params(s, accept_top_k=2, accept_margin=1.0)] * n, generators(n), q, support)
-        assert all(torch.equal(a, b) for a, b in zip(plain[:3], km[:3]))
+        wide = verify_batch(tokens, logits, [params(s, accept_top_k=4, accept_margin=10.0)] * n, generators(n), q, support)
+        assert all(torch.equal(a, b) for a, b in zip(plain[:3], wide[:3]))
+    tail = torch.full((n, 1), 2)  # MTP's point mass on a token outside the gate 2:1.0
+    gated = verify_batch(tail, logits, [params(0.5, accept_top_k=2, accept_margin=1.0)] * n, generators(n))
+    plain = verify_batch(tail, logits, [params(0.5)] * n, generators(n))
+    assert not gated[2].any() and plain[2].any()  # outside the gate: no boosted accept
+    assert torch.equal(gated[0] > 0, (plain[0] > 0) & ~plain[2][:, 0])  # the same uniforms: exactly the boosts go
+
+
+def test_soft_gate_needs_a_sampled_relaxed_request():
+    assert params(0.5, accept_top_k=3, accept_margin=2.0).soft_gate == (3, 2.0)
+    assert params(0.5).soft_gate is None  # the defaults (1, 0.0): no gate
+    assert params(0.5, accept_top_k=3).soft_gate == (3, 0.0) and params(0.5, accept_margin=1.0).soft_gate == (1, 1.0)
+    assert params(0.0, accept_top_k=3, accept_margin=2.0).soft_gate is None
     assert not params(0.0, accept_top_k=3, accept_margin=2.0).relaxed
+    assert SamplingParams(temperature=0.0, accept_soft=0.5, accept_top_k=3, accept_margin=2.0).soft_gate is None
 
 
 def test_greedy_rows_ignore_accept_soft():
@@ -161,3 +215,31 @@ def test_validation_and_server_default():
     finally:
         validation.set_accept_default(1, 0.0)
     assert validation.ACCEPT_SOFT_DEFAULT == 0.0
+
+
+def test_server_soft_gate_default():
+    try:
+        validation.set_accept_default(3, 2.0, soft=0.5, soft_gate=(2, 1.0))
+        assert _sampling_from({"temperature": 1.0}).soft_gate == (2, 1.0)
+        assert _sampling_from({"temperature": 1.0, "accept_top_k": 4, "accept_margin": 3.0}).soft_gate == (4, 3.0)
+        assert _sampling_from({"temperature": 1.0, "accept_top_k": 1}).soft_gate == (2, 1.0)  # not both: the server's
+        assert _sampling_from({"temperature": 1.0, "accept_top_k": 1, "accept_margin": 0}).soft_gate is None  # both: none
+        assert _sampling_from({"temperature": 1.0, "accept_top_k": 1, "accept_margin": 0.5}).soft_gate == (1, 0.5)
+        greedy = _sampling_from({"temperature": 0.0})
+        assert (greedy.accept_top_k, greedy.accept_margin) == (3, 2.0) and greedy.soft_gate is None
+        for bad in ((2, -1.0), (0, 1.0), (2, math.inf)):
+            with pytest.raises(InvalidRequest, match="accept_soft gate"):
+                validation.set_accept_default(1, 0.0, soft=0.5, soft_gate=bad)
+        assert validation.parse_soft_gate("off") == validation.parse_soft_gate("1:0") == (1, 0.0)
+        assert validation.parse_soft_gate("3:2.0") == (3, 2.0) and validation.parse_soft_gate("1:0.5") == (1, 0.5)
+        for bad in ("3", "0:1", "3:-1", "3:inf", "a:b"):
+            with pytest.raises(ValueError, match="accept_soft gate"):
+                validation.parse_soft_gate(bad)
+    finally:
+        validation.set_accept_default(1, 0.0)
+    assert validation.ACCEPT_SOFT_GATE == (1, 0.0) and _sampling_from({"temperature": 1.0, "accept_soft": 0.5}).soft_gate is None
+    # no server gate: one field alone takes the server's gate, (1, 0.0), so the rule stays ungated
+    for one in ({"accept_top_k": 3}, {"accept_margin": 1.0}, {"sampling_params": {"accept_top_k": 3}}):
+        assert _sampling_from({"temperature": 1.0, "accept_soft": 0.5, **one}).soft_gate is None, one
+    assert _sampling_from({"temperature": 1.0, "accept_soft": 0.5, "accept_top_k": 3, "accept_margin": 2.0}).soft_gate == (3, 2.0)
+    assert _sampling_from({"temperature": 0.0, "accept_top_k": 3}).accept_top_k == 3  # greedy requests keep their fields

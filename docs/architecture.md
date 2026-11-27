@@ -1,7 +1,7 @@
 # Engine architecture
 
-One GB10 (or two, tensor-parallel), four pinned targets (Qwen3.8-27B, Qwen3.8-Flash-Next and, on one Spark,
-Nemotron-3.5-Super and Bolt), one target per process. The contracts between the parts are in [interfaces](interfaces.md).
+One GB10 (or two, tensor-parallel), five pinned targets (Qwen3.8-27B, Qwen3.8-Flash-Next and, on one Spark,
+Nemotron-3.5-Super, Bolt and Inkling-2-Mini), one target per process. The contracts between the parts are in [interfaces](interfaces.md).
 
 ## Layout
 
@@ -15,9 +15,9 @@ engine/     loop (engine thread, request tickets) and scheduler (admission, chun
             config (EngineConfig), contracts, traces
 cache/      KV pool, state pool, radix prefix cache (GPU and SSD), request state, SSD tier and store, ledger,
             speculation memory budget
-model/      Qwen38 (the 27B) and its layers; flashnext/, nemotron/ (Super) and bolt/; mtp.py (27B MTP head);
+model/      Qwen38 (the 27B) and its layers; flashnext/, nemotron/ (Super), bolt/ and inkling/; mtp.py (27B MTP head);
             parallel_draft.py (DFlash2 body); lilicorr.py (Bolt's LiLiCorr draft); draft_linear.py
-proposers/  factory; DFlash2 (parallel*), MTP (mtp*); draft heads (draft_head, draft_vocab)
+proposers/  factory; DFlash2 (parallel*), MTP (mtp*), Inkling's DSpark (dspark); draft heads (draft_head, draft_vocab)
 kernels/    dispatch (ops.py), attention planner, 3-bit GEMM and MoE, FP8 GEMV, fused Triton kernels, the RDMA
             one-shot all-reduce, vendored fla and qsa kernels
 weights/    safetensors loading, ModelOpt NVFP4/FP8 linears, the Linear interface, tensor-parallel sharding,
@@ -74,6 +74,12 @@ benchmark_workloads.py  the fixed benchmark prompts (code, design, reasoning) th
 | Prefix cache, SSD tier, 262K context | yes | yes (sparse attention past 2,048 tokens) | yes (Mamba-2 state as the GDN's) | yes (Mamba-2 state as Super's) |
 | Tensor parallel on two Sparks | yes | yes | no | no |
 | Image input ([API](api.md#images)) | no | no | yes | yes |
+
+Inkling-2-Mini is outside the matrix: incoai's DFlash2 draft (all 7 verified) or its bundled DSpark drafter (a block of
+7, the first 3 verified), decode and verify graphs, exact arithmetic in `exact` and an FP8 trunk, expert sharing,
+relaxed greedy acceptance (top 2 within 0.5) and gated soft sampled acceptance in `fast` and `throughput`, the prefix
+cache with the SSD tier, text only, one Spark
+([details](inkling.md)).
 
 ## Repository boundaries
 

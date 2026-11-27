@@ -4,16 +4,18 @@ from hibana.engine.sampler import InvalidRequest, SamplingParams
 
 # The relaxed rules requests get when they do not set their own (set once by serve()): greedy requests that set
 # neither accept_top_k nor accept_margin get ACCEPT_DEFAULT ((1, 0.0): exact; --accept-default), sampled requests that
-# do not set accept_soft get ACCEPT_SOFT_DEFAULT (0: exact; --accept-soft). Sampled requests ignore accept_top_k and
-# accept_margin.
+# do not set accept_soft get ACCEPT_SOFT_DEFAULT (0: exact; --accept-soft), and those that do not set both accept_top_k
+# and accept_margin get ACCEPT_SOFT_GATE as theirs ((1, 0.0): no gate, every draft gets e^s; --accept-soft-gate). A
+# sampled request's accept_top_k and accept_margin gate its accept_soft (SamplingParams.soft_gate).
 ACCEPT_DEFAULT = (1, 0.0)
 ACCEPT_SOFT_DEFAULT = 0.0
+ACCEPT_SOFT_GATE = (1, 0.0)
 
 
-def set_accept_default(top_k: int, margin: float, soft: float = 0.0) -> None:
-    global ACCEPT_DEFAULT, ACCEPT_SOFT_DEFAULT
+def set_accept_default(top_k: int, margin: float, soft: float = 0.0, soft_gate: tuple[int, float] = (1, 0.0)) -> None:
+    global ACCEPT_DEFAULT, ACCEPT_SOFT_DEFAULT, ACCEPT_SOFT_GATE
     SamplingParams(accept_top_k=top_k, accept_margin=margin, accept_soft=soft).validate()
-    ACCEPT_DEFAULT, ACCEPT_SOFT_DEFAULT = (top_k, margin), soft
+    ACCEPT_DEFAULT, ACCEPT_SOFT_DEFAULT, ACCEPT_SOFT_GATE = (top_k, margin), soft, _checked_gate(soft_gate)
 
 
 def parse_accept_default(text: str | None) -> tuple[int, float]:
@@ -25,6 +27,29 @@ def parse_accept_default(text: str | None) -> tuple[int, float]:
         return (int(k), float(m))
     except ValueError as exc:
         raise ValueError("accept default must be K:M, e.g. 2:1.0, or off") from exc
+
+
+SOFT_GATE_FORM = "the accept_soft gate must be K:M (top K >= 1 within M >= 0 nats of the top token) or off"
+
+
+def _checked_gate(gate: tuple[int, float]) -> tuple[int, float]:
+    try:  # the same range as a request's accept_top_k and accept_margin
+        SamplingParams(accept_top_k=gate[0], accept_margin=gate[1]).validate()
+    except InvalidRequest as exc:
+        raise InvalidRequest(SOFT_GATE_FORM) from exc
+    return gate
+
+
+def parse_soft_gate(text: str | None) -> tuple[int, float]:
+    """'off', '' or None -> (1, 0.0): no gate; 'K:M' -> a draft gets e^s only within the target's top K and M nats."""
+    if text is None or text.strip().lower() in ("", "off"):
+        return (1, 0.0)
+    try:
+        k, m = text.split(":")
+        gate = (int(k), float(m))
+    except ValueError as exc:
+        raise ValueError(SOFT_GATE_FORM) from exc
+    return _checked_gate(gate)
 
 
 def _sampling_from(body: dict, max_default: int = 512) -> SamplingParams:
@@ -56,9 +81,11 @@ def _sampling_from(body: dict, max_default: int = 512) -> SamplingParams:
         accept_margin=body.get("accept_margin", sp.get("accept_margin", 0.0)),
         accept_soft=soft if soft is not None else ACCEPT_SOFT_DEFAULT,
     )
-    if (params.greedy and "accept_top_k" not in body and "accept_top_k" not in sp and "accept_margin" not in body
-            and "accept_margin" not in sp and ACCEPT_DEFAULT != (1, 0.0)):
+    given = [k in body or k in sp for k in ("accept_top_k", "accept_margin")]
+    if params.greedy and not any(given) and ACCEPT_DEFAULT != (1, 0.0):
         params.accept_top_k, params.accept_margin = ACCEPT_DEFAULT
+    elif not params.greedy and not all(given):  # a sampled request's gate is both its fields or the server's
+        params.accept_top_k, params.accept_margin = ACCEPT_SOFT_GATE
     params.validate()
     return params
 

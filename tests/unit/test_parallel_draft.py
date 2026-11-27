@@ -107,6 +107,30 @@ def test_a_draft_takes_its_mask_token_and_taps_from_its_checkpoint(tmp_path):
         ParallelDraftModel(tmp_path, target, 64)
 
 
+def test_inkling_style_draft_taps_the_final_norm_and_softcaps_corrected_scores(tmp_path):
+    # Inkling's DFlash2: the last tap is one past the target's layers (its final norm), and the selector softcaps the
+    # scores after the predecessor correction, not the head's logits before it
+    from safetensors.torch import save_file
+    hidden, vocab, k, cap = 32, 50, 4, 3.0
+    shapes = {'fc.weight': (hidden, 4 * hidden), 'hidden_norm.weight': (hidden,), 'norm.weight': (hidden,),
+              'candidate_selector.hidden_projection.weight': (8, hidden), 'candidate_selector.predecessor_codebook': (vocab, 8),
+              'candidate_selector.successor_codebook': (vocab, 8)}
+    save_file({name: torch.zeros(shape, dtype=torch.bfloat16) for name, shape in shapes.items()}, str(tmp_path / 'model.safetensors'))
+    (tmp_path / 'config.json').write_text(json.dumps({
+        'architectures': ['DFlash2DraftModel'], 'hidden_size': hidden, 'num_attention_heads': 2, 'num_key_value_heads': 1,
+        'head_dim': 16, 'num_hidden_layers': 0, 'sliding_window': 2048, 'rope_parameters': {'rope_theta': 10000, 'rope_type': 'default'},
+        'dflash_config': {'block_size': 8, 'mask_token_id': 7, 'target_layer_ids': [5, 23, 41, 48], 'selector_top_k': k,
+                          'final_logit_softcapping': cap, 'selector_softcap_mode': 'after_correction'}}))
+    rows = torch.linspace(-20, 20, 2 * 3 * vocab).view(6, vocab)
+    target = SimpleNamespace(embed=torch.zeros(vocab, hidden, dtype=torch.bfloat16), device=torch.device('cpu'),
+                             head_logits=lambda x: rows, target=SimpleNamespace(num_layers=48))
+    model = ParallelDraftModel(tmp_path, target, 64)
+    assert (model.final_norm, model.features, model.feature_width) == (True, (5, 23, 41), hidden)
+    candidates, scores = model.selector(torch.zeros(2, 3, hidden, dtype=torch.bfloat16), torch.zeros(2, dtype=torch.int64))
+    values = rows.view(2, 3, vocab).topk(k, dim=-1).values
+    torch.testing.assert_close(scores, (torch.tanh(values / cap) * cap)[:, :, None].expand(-1, -1, k, -1))
+
+
 class _DraftModel:
     """A stand-in drafter: records its calls; hidden rows carry the token and position, the selector fixed candidates."""
     mask_token, window, width = 5, 8, 4
