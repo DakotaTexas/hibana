@@ -265,3 +265,11 @@ transformers' dialect (`api/chat_template.py`), `enable_thinking: false` becomes
 `reasoning_effort: "none"` (a request's `chat_template_kwargs` can set `reasoning_effort` itself), and
 `api/parsers/inkling.py` splits a reply's `<|content_thinking|>`, `<|content_text|>` and
 `<|content_invoke_tool_json|>` messages into reasoning, content and tool calls.
+
+- **Thinking off is effort 0.** The template turns `"none"` into "Thinking effort level: 0.0", and the model may still
+  write a short reasoning message (a 1,024-token coding reply spent 314 on it). It comes back as reasoning, not content.
+- **Tool calls.** A call whose body is not a `{"name", "args"}` object (cut off at `max_tokens`, or not JSON) stays in the
+  content as the model wrote it; a call without a name takes its message header's. Another role's message token
+  (user, system, tool) ends the model's turn.
+- **No constrained output.** A JSON `response_format` or a required or named `tool_choice` is rejected with 400: the
+  grammar emits bare JSON or tool XML, which Inkling's turn framing cannot carry.

@@ -118,16 +118,17 @@ uv run hibana serve bolt                # http://127.0.0.1:30006
 </details>
 
 <details>
-<summary><h3>Inkling 2 Mini</h3></summary>
+<summary><h3><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/thinking-machines-dark.png"><img src="docs/assets/thinking-machines.png" height="24" alt=""></picture> Inkling 2 Mini</h3></summary>
 
 Thinking Machines' 26B looped mixture-of-experts model (3.4B active; the middle layers run three passes a token), on
-one Spark. Text only.
+one Spark.
 
 ```bash
 uv run hibana serve inkling             # http://127.0.0.1:30007
 ```
 
 - **Download:** 20 GB
+- **Input:** text
 - **Draft:** [incoai/Inkling-2-Mini-DFlash2](https://huggingface.co/incoai/Inkling-2-Mini-DFlash2), or its bundled DSpark drafter (`HIBANA_PROPOSER=dspark`)
 - **Checkpoint:** [thinkingmachines/Inkling-2-Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini)
 - **More:** [Inkling 2 Mini](docs/inkling.md)
