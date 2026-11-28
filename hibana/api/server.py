@@ -234,7 +234,9 @@ def create_app(engine: EngineLoop, tok: SnapshotTokenizer, tmpl: ChatTemplate, d
 
     @app.get("/v1/models")
     async def models():
-        return {"object": "list", "data": [{"id": MODEL_ID, "object": "model", "owned_by": "hibana", "root": MODEL_ID}]}
+        return {"object": "list", "data": [{"id": MODEL_ID, "object": "model", "owned_by": "hibana",
+                                          "root": MODEL_ID,
+                                          "max_model_len": describe.get("context_length", targets.DEFAULT_TARGET.context_length)}]}
 
     @app.get("/get_server_info")
     @app.get("/describe")
